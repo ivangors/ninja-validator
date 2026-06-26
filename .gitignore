@@ -1,0 +1,43 @@
+/workspace/
+src/workspace/
+benchmark_results/
+data/
+misc/
+start_fast_king_eval.sh
+start_swebench_king_benchmark.sh
+start_terminal_bench_king_benchmark.sh
+tests/test_benchmarks.py
+tests/test_docker_solver_cleanup.py
+tests/test_swebench_crown_benchmark.py
+tests/test_task_only_hf_export.py
+tests/test_terminal_bench_crown_benchmark.py
+
+# Local environment
+.env
+.venv/
+.python-version
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Runtime logs
+validator.log
+logs/
+*.log
+*.pid
+
+# OS/editor cruft
+.DS_Store

@@ -1,0 +1,111 @@
+[project]
+name = "swe-eval"
+version = "0.1.0"
+description = "Simple commit-mining and Cursor evaluation pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "bittensor>=10.2.0",
+    "boto3>=1.35.0",
+    "datasets>=3.0.0",
+    "huggingface_hub>=0.36.0",
+    "httpx>=0.28.0",
+    "pyflakes>=3.2.0",
+]
+
+[project.scripts]
+tau = "tau_entrypoint:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "tau",
+    "tau.bittensor",
+    "tau.io",
+    "tau.rollouts",
+]
+py-modules = [
+    "claude_runner",
+    "claw_runner",
+    "cli",
+    "compare",
+    "config",
+    "cursor_runner",
+    "docker_solver",
+    "eval",
+    "fast_crown_eval",
+    "benchmarks",
+    "github_miner",
+    "openrouter_client",
+    "openrouter_proxy",
+    "pipeline",
+    "diff_judge_logging",
+    "private_submission",
+    "validator_state_io",
+    "r2",
+    "solver_runner",
+    "submission_api",
+    "swebench_crown_benchmark",
+    "terminal_bench_crown_benchmark",
+    "terminal_bench_mini_swe_agent",
+    "terminal_bench_tau_agent",
+    "task_generation",
+    "task_only_hf_export",
+    "task_pool_manager",
+    "tau_entrypoint",
+    "validate",
+    "workspace",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "claude_runner",
+    "claw_runner",
+    "cli",
+    "compare",
+    "config",
+    "cursor_runner",
+    "docker_solver",
+    "eval",
+    "fast_crown_eval",
+    "benchmarks",
+    "github_miner",
+    "openrouter_client",
+    "openrouter_proxy",
+    "pipeline",
+    "diff_judge_logging",
+    "private_submission",
+    "validator_state_io",
+    "r2",
+    "solver_runner",
+    "submission_api",
+    "swebench_crown_benchmark",
+    "terminal_bench_crown_benchmark",
+    "terminal_bench_mini_swe_agent",
+    "terminal_bench_tau_agent",
+    "task_generation",
+    "task_pool_manager",
+    "tau_entrypoint",
+    "validate",
+    "workspace",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.410",
+    "pytest>=9.0.3",
+]
