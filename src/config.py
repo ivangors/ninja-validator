@@ -300,7 +300,7 @@ class RunConfig:
     validate_github_conflict_resolver_max_tokens: int = field(
         default_factory=lambda: _env_int_default("VALIDATE_GITHUB_CONFLICT_RESOLVER_MAX_TOKENS", 32_000)
     )
-    validate_publish_repo: str = field(default_factory=lambda: _env_str("VALIDATE_PUBLISH_REPO") or "unarbos/ninja")
+    validate_publish_repo: str = field(default_factory=lambda: _env_str("VALIDATE_PUBLISH_REPO") or "ninja-subnet/ninja")
     validate_publish_base: str = field(default_factory=lambda: _env_str("VALIDATE_PUBLISH_BASE") or "main")
     validate_private_submission_watch: bool = field(default_factory=lambda: _env_bool("VALIDATE_PRIVATE_SUBMISSION_WATCH"))
     validate_private_submission_only: bool = field(default_factory=lambda: _env_bool("VALIDATE_PRIVATE_SUBMISSION_ONLY"))

@@ -68,7 +68,7 @@ from workspace import (
 log = logging.getLogger("swe-eval.validate")
 _DEFAULT_GITHUB_AGENT_FILE = "agent.py"
 _GITHUB_AGENT_MANIFEST_FILENAME = "tau_agent_files.json"
-_MINER_AGENT_REPO_FULL_NAME = "unarbos/ninja"
+_MINER_AGENT_REPO_FULL_NAME = "ninja-subnet/ninja"
 _MINER_AGENT_BRANCH = "main"
 _GITHUB_COMMIT_RE = re.compile(
     r"^(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@(?P<sha>[0-9a-fA-F]{7,64})$"

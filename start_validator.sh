@@ -42,6 +42,6 @@ exec /home/const/subnet66/.venv/bin/python -m cli validate \
   --hotkey-spent-since-block 8104340 \
   --watch-private-submissions \
   --private-submission-only \
-  --publish-repo unarbos/ninja \
+  --publish-repo ninja-subnet/ninja \
   --publish-base main
 '

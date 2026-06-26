@@ -57,7 +57,7 @@ def main() -> int:
     config = RunConfig(
         workspace_root=args.workspace_root.resolve(),
         validate_netuid=args.netuid,
-        validate_publish_repo="unarbos/ninja",
+        validate_publish_repo="ninja-subnet/ninja",
         validate_publish_base="main",
     )
     paths = _prepare_validate_paths(config.validate_root)
