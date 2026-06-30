@@ -83,7 +83,7 @@ class ReferenceScoringTest(unittest.TestCase):
         self.assertAlmostEqual(challenger_mean, 0.475)
         self.assertAlmostEqual(delta, 0.025)
         self.assertTrue(_challenger_wins_by_mean_score(rounds, margin=0.02))
-        self.assertFalse(_challenger_wins_by_mean_score(rounds, margin=0.03))
+        self.assertFalse(_challenger_wins_by_mean_score(rounds, margin=0.05))
 
     def test_speed_stop_waits_until_result_is_mathematically_decided(self):
         self.assertIsNone(

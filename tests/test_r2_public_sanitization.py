@@ -382,7 +382,7 @@ class R2PublicSanitizationTest(unittest.TestCase):
                 "king_before": {},
                 "challenger": {},
                 "scoring_method": "mean_score",
-                "mean_score_margin": 0.03,
+                "mean_score_margin": 0.05,
                 "king_score_mean": 0.5,
                 "challenger_score_mean": 0.55,
                 "score_mean_delta": 0.05,
@@ -395,7 +395,7 @@ class R2PublicSanitizationTest(unittest.TestCase):
         )
 
         self.assertEqual(summary["scoring_method"], "mean_score")
-        self.assertEqual(summary["mean_score_margin"], 0.03)
+        self.assertEqual(summary["mean_score_margin"], 0.05)
         self.assertEqual(summary["king_score_mean"], 0.5)
         self.assertEqual(summary["challenger_score_mean"], 0.55)
         self.assertAlmostEqual(summary["score_mean_delta"], 0.05)
@@ -442,7 +442,7 @@ class R2PublicSanitizationTest(unittest.TestCase):
             "challenger_commit_sha": "challenger-sha",
             "challenger_commitment_block": 456,
             "scoring_method": "mean_score",
-            "mean_score_margin": 0.03,
+            "mean_score_margin": 0.05,
             "king_score_mean": 0.42,
             "challenger_score_mean": 0.47,
             "score_mean_delta": 0.05,
@@ -471,7 +471,7 @@ class R2PublicSanitizationTest(unittest.TestCase):
         self.assertEqual(entry["disqualification_reason"], "copy detected (6 near-exact rounds >= 0.98)")
         self.assertEqual(entry["confirmation_of_duel_id"], 43)
         self.assertEqual(entry["scoring_method"], "mean_score")
-        self.assertEqual(entry["mean_score_margin"], 0.03)
+        self.assertEqual(entry["mean_score_margin"], 0.05)
         self.assertEqual(entry["king_score_mean"], 0.42)
         self.assertEqual(entry["challenger_score_mean"], 0.47)
         self.assertEqual(entry["score_mean_delta"], 0.05)

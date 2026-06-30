@@ -378,7 +378,7 @@ python -m cli validate \
   --task-pool-static \
   --duel-rounds 50 \
   --scoring-method mean \
-  --mean-score-margin 0.03 \
+  --mean-score-margin 0.05 \
   --hotkey-spent-since-block 8104340 \
   --watch-private-submissions \
   --private-submission-only \
@@ -406,8 +406,8 @@ reasoning and prompt-cache breakpoints, but production currently runs GLM 5.2
 through `z-ai/fp8` with no configured fallback models.
 
 Cursor is telemetry only for round scoring. In production, `start_validator.sh`
-uses `--scoring-method mean --mean-score-margin 0.03`: the challenger must beat
-the king's paired raw mean judge score by at least `0.03` across the duel. The
+uses `--scoring-method mean --mean-score-margin 0.05`: the challenger must beat
+the king's paired raw mean judge score by at least `0.05` across the duel. The
 older `round-wins` scoring mode is still available and uses `--win-margin`.
 
 The validator still compares `king` to `challenger` separately for copy detection, but that pairwise similarity does not affect the round score.
