@@ -2,6 +2,7 @@ import json
 import tempfile
 import threading
 import unittest
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -106,6 +107,7 @@ class TaskPoolManagerTest(unittest.TestCase):
         with manager._SAVED_TASK_FILL_LOCK:
             manager._SAVED_TASK_FILL_IN_FLIGHT.clear()
             manager._SAVED_TASK_FILL_IN_FLIGHT_FINGERPRINTS.clear()
+            manager._POOL_FILL_IN_FLIGHT_NAMES.clear()
 
     def test_pool_filler_worker_count_matches_solve_slots(self):
         config = RunConfig(validate_pool_filler_concurrency=25)
@@ -127,6 +129,31 @@ class TaskPoolManagerTest(unittest.TestCase):
             entered = True
 
         self.assertTrue(entered)
+
+    def test_prod_sized_pool_prepares_full_cache_batch_even_for_partial_deficit(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = RunConfig(
+                workspace_root=root,
+                validate_task_pool_target=50,
+                validate_task_pool_static=False,
+                validate_pool_filler_concurrency=25,
+            )
+            pool = TaskPool(root / "pool")
+            for idx in range(49):
+                task = self._task(config, name=f"validate-20260101000000-{idx:06d}")
+                pool.add(task, keep=50)
+
+            self.assertEqual(
+                manager._pool_prepare_batch_size(
+                    config=config,
+                    pool=pool,
+                    king=self._submission(),
+                    pool_label="primary",
+                    max_batch_size=25,
+                ),
+                25,
+            )
 
     def test_pool_filler_paused_while_validator_duel_active(self):
         with tempfile.TemporaryDirectory() as td:
@@ -302,7 +329,7 @@ class TaskPoolManagerTest(unittest.TestCase):
             self.assertTrue(should_prepare)
             self.assertFalse(archive_rotation)
 
-    def test_generated_task_fill_solves_only_king_with_static_timeout_and_reference_scoring(self):
+    def test_generated_task_fill_probes_then_caches_king_with_static_timeout(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             config = RunConfig(
@@ -310,11 +337,13 @@ class TaskPoolManagerTest(unittest.TestCase):
                 validate_task_pool_target=1,
                 validate_task_pool_static=False,
                 validate_task_pool_fill_from_saved=False,
+                record_rollouts=True,
             )
             pool = TaskPool(root / "pool")
             king = self._submission()
             validate._save_state(config.validate_root / "state.json", ValidatorState(current_king=king))
             solved: list[str] = []
+            rollout_flags: list[tuple[str, bool]] = []
 
             def fake_generate_task_run(*, task_name: str, config: RunConfig):
                 task_root = config.tasks_root / task_name
@@ -328,6 +357,7 @@ class TaskPoolManagerTest(unittest.TestCase):
 
             def fake_solve_task_run(*, task_name: str, solution_name: str, config: RunConfig):
                 solved.append(solution_name)
+                rollout_flags.append((solution_name, config.record_rollouts))
                 solution_dir = config.tasks_root / task_name / "solutions" / solution_name
                 solution_dir.mkdir(parents=True, exist_ok=True)
                 (solution_dir / "repo").mkdir(exist_ok=True)
@@ -362,14 +392,129 @@ class TaskPoolManagerTest(unittest.TestCase):
                 )
 
             self.assertTrue(did_work)
-            self.assertEqual(solved, ["king"])
+            self.assertEqual(solved, [manager._POOL_KING_PROBE_SOLUTION_NAME, "king"])
+            self.assertEqual(rollout_flags, [(manager._POOL_KING_PROBE_SOLUTION_NAME, False), ("king", True)])
             self.assertEqual(pool.size(), 1)
             task = pool.list_tasks()[0]
+            self.assertFalse((Path(task.task_root) / "solutions" / manager._POOL_KING_PROBE_SOLUTION_NAME).exists())
             self.assertEqual(task.cursor_elapsed, 0.0)
             self.assertEqual(task.king_lines, 0)
             self.assertEqual(task.king_similarity, 0.0)
             self.assertEqual(task.baseline_lines, 0)
             self.assertEqual(task.agent_timeout_seconds, validate._POOL_KING_QUALIFY_TIMEOUT_SECONDS)
+
+    def test_task_batch_probes_then_caches_eligible_tasks_as_batch(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = RunConfig(
+                workspace_root=root,
+                validate_task_pool_target=3,
+                validate_task_pool_static=False,
+                validate_task_pool_fill_from_saved=False,
+                validate_pool_filler_concurrency=3,
+            )
+            pool = TaskPool(root / "pool")
+            king = self._submission()
+            validate._save_state(config.validate_root / "state.json", ValidatorState(current_king=king))
+            generated: list[str] = []
+            solved: list[tuple[str, str]] = []
+            solve_started_after_generated: list[int] = []
+            final_started_after_probes: list[int] = []
+            probe_finished: list[str] = []
+            final_barrier = threading.Barrier(3)
+            active_final = 0
+            max_active_final = 0
+            events_lock = threading.Lock()
+
+            def fake_generate_task_run(*, task_name: str, config: RunConfig):
+                task_root = config.tasks_root / task_name
+                task_dir = task_root / "task"
+                task_dir.mkdir(parents=True, exist_ok=True)
+                (task_dir / "task.json").write_text("{}\n")
+                (task_dir / "task.txt").write_text("task\n")
+                (task_dir / "commit.json").write_text(
+                    json.dumps(
+                        {
+                            "repo_full_name": "owner/repo",
+                            "commit_sha": task_name,
+                            "sha": task_name,
+                            "parent_sha": "parent",
+                        }
+                    )
+                    + "\n"
+                )
+                (task_dir / "reference.patch").write_text("\n".join(f"+{task_name}-line-{idx}" for idx in range(101)))
+                with events_lock:
+                    generated.append(task_name)
+                return SimpleNamespace(task_root=str(task_root))
+
+            def fake_solve_task_run(*, task_name: str, solution_name: str, config: RunConfig):
+                nonlocal active_final, max_active_final
+                with events_lock:
+                    solve_started_after_generated.append(len(generated))
+                    solved.append((solution_name, task_name))
+                    if solution_name == "king":
+                        final_started_after_probes.append(len(probe_finished))
+                        active_final += 1
+                        max_active_final = max(max_active_final, active_final)
+                if solution_name == "king":
+                    try:
+                        final_barrier.wait(timeout=5)
+                    finally:
+                        with events_lock:
+                            active_final -= 1
+                solution_dir = config.tasks_root / task_name / "solutions" / solution_name
+                solution_dir.mkdir(parents=True, exist_ok=True)
+                (solution_dir / "repo").mkdir(exist_ok=True)
+                (solution_dir / "solution.diff").write_text("diff\n")
+                (solution_dir / "solve.json").write_text(
+                    json.dumps(
+                        {
+                            "agent_timeout_seconds": config.agent_timeout,
+                            "result": {
+                                "exit_reason": "completed",
+                                "elapsed_seconds": 1.0,
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+                if solution_name == manager._POOL_KING_PROBE_SOLUTION_NAME:
+                    with events_lock:
+                        probe_finished.append(task_name)
+                return SimpleNamespace(exit_reason="completed", elapsed_seconds=1.0)
+
+            with patch("task_pool_manager.generate_task_run", side_effect=fake_generate_task_run), patch(
+                "task_pool_manager.solve_task_run",
+                side_effect=fake_solve_task_run,
+            ), patch(
+                "task_pool_manager.v._build_agent_config",
+                side_effect=lambda config, _sub: config,
+            ), patch(
+                "task_pool_manager.v._open_subtensor",
+                side_effect=lambda _config: nullcontext(SimpleNamespace(block=7)),
+            ):
+                did_work = manager._prepare_task_batch_for_pool(
+                    config=config,
+                    pool=pool,
+                    pool_label="primary",
+                    state_lock=threading.Lock(),
+                    pool_solve_semaphore=threading.BoundedSemaphore(3),
+                    batch_size=3,
+                )
+
+            self.assertTrue(did_work)
+            self.assertEqual(len(generated), 3)
+            self.assertEqual([name for name, _task_name in solved].count(manager._POOL_KING_PROBE_SOLUTION_NAME), 3)
+            self.assertEqual([name for name, _task_name in solved].count("king"), 3)
+            self.assertEqual(solve_started_after_generated, [3, 3, 3, 3, 3, 3])
+            self.assertEqual(final_started_after_probes, [3, 3, 3])
+            self.assertEqual(max_active_final, 3)
+            self.assertEqual(pool.size(), 3)
+            for task in pool.list_tasks():
+                task_root = Path(task.task_root)
+                self.assertFalse((task_root / "solutions" / manager._POOL_KING_PROBE_SOLUTION_NAME).exists())
+                self.assertTrue((task_root / "solutions" / "king" / "solution.diff").is_file())
 
     def test_claim_saved_task_for_pool_skips_archived_tasks(self):
         with tempfile.TemporaryDirectory() as td:

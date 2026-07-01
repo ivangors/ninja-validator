@@ -11,7 +11,7 @@ import tempfile
 import threading
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,7 +41,9 @@ _POOL_FILL_IN_FLIGHT_NAMES: set[str] = set()
 _ROLLOUT_EXPORT_EXCLUDE_LOCK = threading.Lock()
 _ROLLOUT_EXPORT_EXCLUDE_CACHE: dict[Path, tuple[int, set[str], set[str]]] = {}
 _POOL_FILL_ADD_LOCK = threading.Lock()
+_POOL_FINAL_CACHE_BATCH_LOCK = threading.Lock()
 _POOL_FILLER_WORKER_OVERSUBSCRIBE = 1
+_POOL_KING_PROBE_SOLUTION_NAME = "king-probe"
 # Throttle concurrent GitHub-sourced task generation independently of solve
 # concurrency. Pool-filler workers each call generate_task_run() (GitHub commit
 # sampling) before solving; without a cap, every worker can hammer the GitHub
@@ -1094,6 +1096,22 @@ def pool_solve_slot(pool_solve_semaphore: threading.Semaphore | None):
     return pool_solve_semaphore if pool_solve_semaphore is not None else nullcontext()
 
 
+@contextmanager
+def _reserve_pool_solve_slots(pool_solve_semaphore: threading.Semaphore | None, count: int):
+    if pool_solve_semaphore is None:
+        yield
+        return
+    acquired = 0
+    try:
+        for _ in range(max(1, int(count))):
+            pool_solve_semaphore.acquire()
+            acquired += 1
+        yield
+    finally:
+        for _ in range(acquired):
+            pool_solve_semaphore.release()
+
+
 def _load_manager_state(config: RunConfig) -> v.ValidatorState:
     try:
         return v._load_state(config.validate_root / "state.json")
@@ -1136,18 +1154,134 @@ def reset_solution_artifacts(*, task_name: str, solution_name: str, config: RunC
         raise RuntimeError(f"failed to remove stale solution workspace {solution_root}")
 
 
-def _prepare_one_task_for_pool(
+def _solution_solve_qualifies_for_pool(
+    *,
+    task_name: str,
+    solution_name: str,
+    config: RunConfig,
+) -> tuple[bool, str]:
+    try:
+        task_paths = resolve_task_paths(config.tasks_root, task_name)
+    except FileNotFoundError:
+        return False, "task workspace is missing"
+
+    solution_paths = build_solution_paths(task_paths, solution_name)
+    if not solution_paths.solve_json_path.is_file():
+        return False, f"{solution_name} solve artifact is missing"
+    try:
+        payload = json.loads(solution_paths.solve_json_path.read_text())
+    except Exception as exc:
+        return False, f"{solution_name} solve artifact is unreadable: {exc}"
+    if not isinstance(payload, dict):
+        return False, f"{solution_name} solve artifact is invalid"
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return False, f"{solution_name} solve artifact has no result"
+    exit_reason = str(result.get("exit_reason") or "")
+    if exit_reason not in v._ACCEPTABLE_KING_POOL_EXIT_REASONS:
+        return False, f"{solution_name} exit_reason={exit_reason or 'missing'}"
+    diff_text = (
+        solution_paths.solution_diff_path.read_text().strip()
+        if solution_paths.solution_diff_path.is_file()
+        else ""
+    )
+    if not diff_text:
+        return False, f"{solution_name} produced empty patch"
+    return True, ""
+
+
+@dataclass(slots=True)
+class PreparedPoolTask:
+    task_name: str
+    task_root: str
+    king_hotkey: str
+    king_commit_sha: str
+    generated_task_root: Path | None = None
+    saved_task_name: str | None = None
+    archive_reservation_name: str | None = None
+    archive_reservation_hour: str | None = None
+    reserved_task_name: str | None = None
+    reserved_fingerprint_name: str | None = None
+    added_to_pool: bool = False
+
+
+def _cleanup_prepared_pool_task(config: RunConfig, prepared: PreparedPoolTask) -> None:
+    release_saved_task_claim(prepared.saved_task_name)
+    release_pool_fill_name(prepared.reserved_task_name)
+    if (
+        prepared.reserved_fingerprint_name is not None
+        and prepared.reserved_fingerprint_name != prepared.saved_task_name
+    ):
+        release_saved_task_claim(prepared.reserved_fingerprint_name)
+    release_archive_reservation(config=config, task_name=prepared.archive_reservation_name)
+    if (
+        not prepared.added_to_pool
+        and prepared.generated_task_root is not None
+        and prepared.generated_task_root.exists()
+    ):
+        shutil.rmtree(prepared.generated_task_root, ignore_errors=True)
+
+
+def _pool_fill_deficit_for_king(
+    *,
+    config: RunConfig,
+    pool: v.TaskPool,
+    king: v.ValidatorSubmission | None,
+) -> int:
+    target = max(0, int(config.validate_task_pool_target))
+    if target <= 0 or king is None:
+        return 0
+    if not config.validate_task_pool_static:
+        return max(0, target - pool.size())
+
+    valid = 0
+    for task in pool.list_tasks():
+        if not v._pool_task_matches_king(task, king):
+            continue
+        healthy, _ = v._pool_task_has_healthy_king_cache(config=config, task=task)
+        if healthy:
+            valid += 1
+    return max(0, target - valid)
+
+
+def _pool_prepare_batch_size(
+    *,
+    config: RunConfig,
+    pool: v.TaskPool,
+    king: v.ValidatorSubmission | None,
+    pool_label: str,
+    max_batch_size: int,
+) -> int:
+    max_batch_size = max(1, int(max_batch_size))
+    target = max(0, int(config.validate_task_pool_target))
+    deficit = _pool_fill_deficit_for_king(config=config, pool=pool, king=king)
+    if deficit > 0:
+        if target >= max_batch_size:
+            return max_batch_size
+        return min(max_batch_size, deficit)
+
+    should_prepare, _reason, archive_rotation = pool_should_prepare_task(
+        config=config,
+        pool=pool,
+        king=king,
+        pool_label=pool_label,
+    )
+    # Archive rotation mutates a full pool. Keep that path one-at-a-time so a
+    # batch cannot reserve more hourly archive slots than it will actually use.
+    return 1 if should_prepare and archive_rotation else 0
+
+
+def _claim_one_task_for_pool(
     *,
     config: RunConfig,
     pool: v.TaskPool,
     pool_label: str,
     state_lock: threading.Lock,
-    pool_solve_semaphore: threading.Semaphore | None = None,
-) -> bool:
+) -> PreparedPoolTask | None:
     state = _load_manager_state(config)
     king = state.current_king
     if king is None or config.validate_task_pool_target <= 0:
-        return False
+        return None
 
     should_prepare, reason, archive_rotation = pool_should_prepare_task(
         config=config,
@@ -1156,16 +1290,11 @@ def _prepare_one_task_for_pool(
         pool_label=pool_label,
     )
     if not should_prepare:
-        return False
-    log.debug("Pool manager[%s]: preparing task (%s)", pool_label, reason)
+        return None
+    log.debug("Pool manager[%s]: claiming task candidate (%s)", pool_label, reason)
 
-    generated_task_root: Path | None = None
-    saved_task_name: str | None = None
-    archive_reservation_name: str | None = None
-    archive_reservation_hour: str | None = None
-    reserved_task_name: str | None = None
-    reserved_fingerprint_name: str | None = None
-    added_to_pool = False
+    prepared: PreparedPoolTask | None = None
+    keep_prepared = False
     try:
         if config.validate_task_pool_fill_from_saved:
             saved_task_root = claim_saved_task_for_pool(
@@ -1175,44 +1304,60 @@ def _prepare_one_task_for_pool(
                 extra_exclude=v._active_duel_task_names(state),
             )
             if saved_task_root is None:
-                return False
+                return None
             task_name = saved_task_root.name
-            saved_task_name = task_name
             claim_pool_fill_name(task_name)
-            reserved_task_name = task_name
+            prepared = PreparedPoolTask(
+                task_name=task_name,
+                task_root=str(saved_task_root),
+                king_hotkey=king.hotkey,
+                king_commit_sha=king.commit_sha,
+                saved_task_name=task_name,
+                reserved_task_name=task_name,
+            )
             task_root = str(saved_task_root)
             log.info("Pool manager[%s]: reusing saved task %s", pool_label, task_name)
         else:
             task_name = _allocate_and_save_task_name(config, state_lock)
             claim_pool_fill_name(task_name)
-            reserved_task_name = task_name
+            prepared = PreparedPoolTask(
+                task_name=task_name,
+                task_root="",
+                king_hotkey=king.hotkey,
+                king_commit_sha=king.commit_sha,
+                reserved_task_name=task_name,
+            )
             if archive_rotation:
                 reservation = reserve_archive_quota(config=config, task_name=task_name, pool_label=pool_label)
                 if reservation is None:
                     log.info("Pool manager[%s]: hourly archive generation quota exhausted before generating %s", pool_label, task_name)
-                    return False
-                archive_reservation_name = task_name
-                archive_reservation_hour = str(reservation["archive_hour"])
+                    return None
+                prepared.archive_reservation_name = task_name
+                prepared.archive_reservation_hour = str(reservation["archive_hour"])
             with _POOL_GENERATION_SEMAPHORE:
                 generate_result = generate_task_run(task_name=task_name, config=config)
             task_root = generate_result.task_root
-            generated_task_root = Path(task_root)
+            prepared.task_root = task_root
+            prepared.generated_task_root = Path(task_root)
             log.info("Pool manager[%s]: generated task %s", pool_label, task_name)
 
-        if archive_rotation and archive_reservation_name is None:
+        if prepared is None:
+            return None
+
+        if archive_rotation and prepared.archive_reservation_name is None:
             reservation = reserve_archive_quota(config=config, task_name=task_name, pool_label=pool_label)
             if reservation is None:
                 log.info("Pool manager[%s]: hourly archive generation quota exhausted before preparing %s", pool_label, task_name)
-                return False
-            archive_reservation_name = task_name
-            archive_reservation_hour = str(reservation["archive_hour"])
+                return None
+            prepared.archive_reservation_name = task_name
+            prepared.archive_reservation_hour = str(reservation["archive_hour"])
 
         if v._count_patch_lines(Path(task_root) / "task" / "reference.patch") < v._MIN_PATCH_LINES:
             log.info("Pool manager[%s]: skipping %s (patch too small)", pool_label, task_name)
-            return False
+            return None
         if task_name in rollout_exported_task_names(config):
             log.info("Pool manager[%s]: skipping %s (rollout already exported)", pool_label, task_name)
-            return False
+            return None
 
         # Reject duplicate task content BEFORE spending any baseline/king solve
         # compute. The insert-time check below remains the final guard; this
@@ -1231,42 +1376,76 @@ def _prepare_one_task_for_pool(
                 )
                 if early_fingerprint in known_fingerprints:
                     log.info("Pool manager[%s]: skipping %s (duplicate task content, pre-solve)", pool_label, task_name)
-                    return False
+                    return None
                 _SAVED_TASK_FILL_IN_FLIGHT_FINGERPRINTS[task_name] = early_fingerprint
-                reserved_fingerprint_name = task_name
+                prepared.reserved_fingerprint_name = task_name
 
         current_state = _load_manager_state(config)
         current_king = current_state.current_king
         if current_king is None or current_king.hotkey != king.hotkey or current_king.commit_sha != king.commit_sha:
             log.info("Pool manager[%s]: discarding %s (king changed before solve)", pool_label, task_name)
-            return False
+            return None
 
+        keep_prepared = True
+        return prepared
+    except Exception as exc:
+        if v._is_github_rate_limit_error(exc):
+            v._note_pool_generation_rate_limit(f"Pool manager[{pool_label}]")
+        log.exception("Pool manager[%s]: error claiming task", pool_label)
+        return None
+    finally:
+        if prepared is not None and not keep_prepared:
+            _cleanup_prepared_pool_task(config, prepared)
+
+
+def _solve_and_insert_prepared_task(
+    *,
+    config: RunConfig,
+    pool: v.TaskPool,
+    pool_label: str,
+    prepared: PreparedPoolTask,
+    pool_solve_semaphore: threading.Semaphore | None = None,
+) -> bool:
+    try:
+        current_state = _load_manager_state(config)
+        current_king = current_state.current_king
+        if (
+            current_king is None
+            or current_king.hotkey != prepared.king_hotkey
+            or current_king.commit_sha != prepared.king_commit_sha
+        ):
+            log.info("Pool manager[%s]: discarding %s (king changed before solve)", pool_label, prepared.task_name)
+            return False
         # No baseline pre-solve: the king solve below is the sole solve. Its
         # timeout (and the stored per-task duel timeout) come from a static
         # qualification budget instead of timing a baseline cursor run.
         agent_timeout = v._POOL_KING_QUALIFY_TIMEOUT_SECONDS
-        reset_solution_artifacts(task_name=task_name, solution_name="king", config=config)
+        reset_solution_artifacts(task_name=prepared.task_name, solution_name="king", config=config)
         king_cfg = replace(v._build_agent_config(config, current_king), agent_timeout=agent_timeout)
         try:
             with pool_solve_slot(pool_solve_semaphore):
-                king_result = solve_task_run(task_name=task_name, solution_name="king", config=king_cfg)
+                king_result = solve_task_run(task_name=prepared.task_name, solution_name="king", config=king_cfg)
         except Exception as exc:
-            log.info("Pool manager[%s]: king solve failed for %s; using empty patch: %s", pool_label, task_name, exc)
-            reset_solution_artifacts(task_name=task_name, solution_name="king", config=config)
-            v._ensure_empty_solution(task_name=task_name, solution_name="king", config=king_cfg, reason=str(exc))
+            log.info("Pool manager[%s]: king solve failed for %s; using empty patch: %s", pool_label, prepared.task_name, exc)
+            reset_solution_artifacts(task_name=prepared.task_name, solution_name="king", config=config)
+            v._ensure_empty_solution(task_name=prepared.task_name, solution_name="king", config=king_cfg, reason=str(exc))
             king_result = None
         if king_result is not None and king_result.exit_reason == "time_limit_exceeded":
-            log.info("Pool manager[%s]: king timed out on %s (agent_timeout=%ss)", pool_label, task_name, agent_timeout)
+            log.info("Pool manager[%s]: king timed out on %s (agent_timeout=%ss)", pool_label, prepared.task_name, agent_timeout)
 
         current_state = _load_manager_state(config)
         current_king = current_state.current_king
-        if current_king is None or current_king.hotkey != king.hotkey or current_king.commit_sha != king.commit_sha:
-            log.info("Pool manager[%s]: discarding %s (king changed during solve)", pool_label, task_name)
+        if (
+            current_king is None
+            or current_king.hotkey != prepared.king_hotkey
+            or current_king.commit_sha != prepared.king_commit_sha
+        ):
+            log.info("Pool manager[%s]: discarding %s (king changed during solve)", pool_label, prepared.task_name)
             return False
 
-        qualifies, skip_reason = v._king_solve_qualifies_for_pool(task_name=task_name, config=config)
+        qualifies, skip_reason = v._king_solve_qualifies_for_pool(task_name=prepared.task_name, config=config)
         if not qualifies:
-            log.info("Pool manager[%s]: skipping %s (%s)", pool_label, task_name, skip_reason)
+            log.info("Pool manager[%s]: skipping %s (%s)", pool_label, prepared.task_name, skip_reason)
             return False
 
         try:
@@ -1278,8 +1457,8 @@ def _prepare_one_task_for_pool(
             creation_block = 0
 
         candidate = v.PoolTask(
-            task_name=task_name,
-            task_root=task_root,
+            task_name=prepared.task_name,
+            task_root=prepared.task_root,
             creation_block=creation_block,
             cursor_elapsed=0.0,
             king_lines=0,
@@ -1291,7 +1470,7 @@ def _prepare_one_task_for_pool(
         )
         healthy, reason = v._pool_task_has_healthy_king_cache(config=config, task=candidate)
         if not healthy:
-            log.info("Pool manager[%s]: skipping %s (%s)", pool_label, task_name, reason)
+            log.info("Pool manager[%s]: skipping %s (%s)", pool_label, prepared.task_name, reason)
             return False
 
         archive_task: v.PoolTask | None = None
@@ -1300,7 +1479,7 @@ def _prepare_one_task_for_pool(
             pending_archive_names = pending_archive_task_names(config)
             candidate_fingerprint = task_content_fingerprint(Path(candidate.task_root))
             if candidate.task_name in rollout_exported_task_names(config):
-                log.info("Pool manager[%s]: skipping %s (rollout exported before insert)", pool_label, task_name)
+                log.info("Pool manager[%s]: skipping %s (rollout exported before insert)", pool_label, prepared.task_name)
                 return False
             existing_fingerprints = (
                 _task_root_fingerprints(_pool_task_roots(pool))
@@ -1310,28 +1489,28 @@ def _prepare_one_task_for_pool(
                 | {
                     fp
                     for name, fp in _SAVED_TASK_FILL_IN_FLIGHT_FINGERPRINTS.items()
-                    if name != task_name
+                    if name != prepared.task_name
                 }
                 | archived_task_fingerprints(config)
                 | rollout_exported_task_fingerprints(config)
             )
             if candidate_fingerprint and candidate_fingerprint in existing_fingerprints:
-                log.info("Pool manager[%s]: skipping %s (duplicate task content)", pool_label, task_name)
+                log.info("Pool manager[%s]: skipping %s (duplicate task content)", pool_label, prepared.task_name)
                 return False
-            should_archive = archive_rotation and archive_reservation_name is not None
+            should_archive = prepared.archive_reservation_name is not None
             if should_archive:
                 if archive_quota_remaining(
                     config,
                     pool_label=pool_label,
-                    hour=archive_reservation_hour,
+                    hour=prepared.archive_reservation_hour,
                 ) <= 0:
                     log.info(
                         "Pool manager[%s]: hourly archive quota exhausted before inserting %s",
                         pool_label,
-                        task_name,
+                        prepared.task_name,
                     )
-                    release_archive_reservation(config=config, task_name=archive_reservation_name)
-                    archive_reservation_name = None
+                    release_archive_reservation(config=config, task_name=prepared.archive_reservation_name)
+                    prepared.archive_reservation_name = None
                     return False
                 archive_task = select_rotation_archive_task(
                     pool.list_tasks(),
@@ -1343,10 +1522,10 @@ def _prepare_one_task_for_pool(
                     log.info(
                         "Pool manager[%s]: no unleased existing task is available to archive before inserting %s",
                         pool_label,
-                        task_name,
+                        prepared.task_name,
                     )
-                    release_archive_reservation(config=config, task_name=archive_reservation_name)
-                    archive_reservation_name = None
+                    release_archive_reservation(config=config, task_name=prepared.archive_reservation_name)
+                    prepared.archive_reservation_name = None
                     return False
             prune_first = v._static_pool_replacement_prune_names(config=config, pool=pool, king=current_king)
             pruned = pool.add(
@@ -1355,8 +1534,9 @@ def _prepare_one_task_for_pool(
                 prune_first=prune_first,
                 preserve=leased_task_names | pending_archive_names,
             )
+            prepared.added_to_pool = True
             if archive_task is not None:
-                hour = archive_reservation_hour or archive_hour()
+                hour = prepared.archive_reservation_hour or archive_hour()
                 record_task_archive_status(
                     config=config,
                     task_name=archive_task.task_name,
@@ -1366,10 +1546,9 @@ def _prepare_one_task_for_pool(
                     hf_path=task_archive_jsonl_path(pool_label, hour),
                     content_fingerprint=task_content_fingerprint(Path(archive_task.task_root)),
                 )
-                release_archive_reservation(config=config, task_name=archive_reservation_name)
-                archive_reservation_name = None
-        added_to_pool = True
-        log.info("Pool manager[%s]: added %s (pool size=%d, pruned=%d)", pool_label, task_name, pool.size(), pruned)
+                release_archive_reservation(config=config, task_name=prepared.archive_reservation_name)
+                prepared.archive_reservation_name = None
+        log.info("Pool manager[%s]: added %s (pool size=%d, pruned=%d)", pool_label, prepared.task_name, pool.size(), pruned)
         if archive_task is not None:
             archive_pool_task_to_hf_jsonl(
                 config=config,
@@ -1384,16 +1563,275 @@ def _prepare_one_task_for_pool(
     except Exception as exc:
         if v._is_github_rate_limit_error(exc):
             v._note_pool_generation_rate_limit(f"Pool manager[{pool_label}]")
-        log.exception("Pool manager[%s]: error preparing task", pool_label)
+        log.exception("Pool manager[%s]: error solving task", pool_label)
         return False
     finally:
-        release_saved_task_claim(saved_task_name)
-        release_pool_fill_name(reserved_task_name)
-        if reserved_fingerprint_name is not None and reserved_fingerprint_name != saved_task_name:
-            release_saved_task_claim(reserved_fingerprint_name)
-        release_archive_reservation(config=config, task_name=archive_reservation_name)
-        if not added_to_pool and generated_task_root is not None and generated_task_root.exists():
-            shutil.rmtree(generated_task_root, ignore_errors=True)
+        _cleanup_prepared_pool_task(config, prepared)
+
+
+def _probe_prepared_task_for_pool(
+    *,
+    config: RunConfig,
+    pool_label: str,
+    prepared: PreparedPoolTask,
+    pool_solve_semaphore: threading.Semaphore | None = None,
+) -> bool:
+    try:
+        current_state = _load_manager_state(config)
+        current_king = current_state.current_king
+        if (
+            current_king is None
+            or current_king.hotkey != prepared.king_hotkey
+            or current_king.commit_sha != prepared.king_commit_sha
+        ):
+            log.info("Pool manager[%s]: discarding %s (king changed before probe)", pool_label, prepared.task_name)
+            return False
+
+        agent_timeout = v._POOL_KING_QUALIFY_TIMEOUT_SECONDS
+        probe_cfg = replace(
+            v._build_agent_config(config, current_king),
+            agent_timeout=agent_timeout,
+            record_rollouts=False,
+        )
+        reset_solution_artifacts(
+            task_name=prepared.task_name,
+            solution_name=_POOL_KING_PROBE_SOLUTION_NAME,
+            config=config,
+        )
+        try:
+            with pool_solve_slot(pool_solve_semaphore):
+                probe_result = solve_task_run(
+                    task_name=prepared.task_name,
+                    solution_name=_POOL_KING_PROBE_SOLUTION_NAME,
+                    config=probe_cfg,
+                )
+        except Exception as exc:
+            log.info("Pool manager[%s]: king probe failed for %s: %s", pool_label, prepared.task_name, exc)
+            return False
+        if probe_result is not None and probe_result.exit_reason == "time_limit_exceeded":
+            log.info(
+                "Pool manager[%s]: king probe timed out on %s (agent_timeout=%ss)",
+                pool_label,
+                prepared.task_name,
+                agent_timeout,
+            )
+
+        qualifies, reason = _solution_solve_qualifies_for_pool(
+            task_name=prepared.task_name,
+            solution_name=_POOL_KING_PROBE_SOLUTION_NAME,
+            config=config,
+        )
+        if not qualifies:
+            log.info("Pool manager[%s]: probe rejected %s (%s)", pool_label, prepared.task_name, reason)
+            return False
+
+        current_state = _load_manager_state(config)
+        current_king = current_state.current_king
+        if (
+            current_king is None
+            or current_king.hotkey != prepared.king_hotkey
+            or current_king.commit_sha != prepared.king_commit_sha
+        ):
+            log.info("Pool manager[%s]: discarding %s (king changed during probe)", pool_label, prepared.task_name)
+            return False
+        return True
+    except Exception as exc:
+        if v._is_github_rate_limit_error(exc):
+            v._note_pool_generation_rate_limit(f"Pool manager[{pool_label}]")
+        log.exception("Pool manager[%s]: error probing task", pool_label)
+        return False
+    finally:
+        _remove_solution_artifacts(
+            task_name=prepared.task_name,
+            solution_name=_POOL_KING_PROBE_SOLUTION_NAME,
+            config=config,
+        )
+
+
+def _probe_task_batch_for_pool(
+    *,
+    config: RunConfig,
+    pool_label: str,
+    prepared: Sequence[PreparedPoolTask],
+    pool_solve_semaphore: threading.Semaphore | None,
+    probe_workers: int,
+) -> list[PreparedPoolTask]:
+    if not prepared:
+        return []
+    workers = max(1, min(len(prepared), int(probe_workers)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(
+                _probe_prepared_task_for_pool,
+                config=config,
+                pool_label=pool_label,
+                prepared=item,
+                pool_solve_semaphore=pool_solve_semaphore,
+            )
+            for item in prepared
+        ]
+        results = [future.result() for future in futures]
+    viable: list[PreparedPoolTask] = []
+    for item, ok in zip(prepared, results, strict=True):
+        if ok:
+            viable.append(item)
+        else:
+            _cleanup_prepared_pool_task(config, item)
+    return viable
+
+
+def _claim_task_batch_for_pool(
+    *,
+    config: RunConfig,
+    pool: v.TaskPool,
+    pool_label: str,
+    state_lock: threading.Lock,
+    batch_size: int,
+) -> list[PreparedPoolTask]:
+    batch_size = max(1, int(batch_size))
+    prepared: list[PreparedPoolTask] = []
+    attempts_remaining = batch_size * 2
+    while len(prepared) < batch_size and attempts_remaining > 0:
+        round_size = min(batch_size - len(prepared), attempts_remaining)
+        attempts_remaining -= round_size
+        with ThreadPoolExecutor(max_workers=round_size) as executor:
+            futures = [
+                executor.submit(
+                    _claim_one_task_for_pool,
+                    config=config,
+                    pool=pool,
+                    pool_label=pool_label,
+                    state_lock=state_lock,
+                )
+                for _ in range(round_size)
+            ]
+            claimed_this_round = 0
+            for future in futures:
+                item = future.result()
+                if item is not None:
+                    prepared.append(item)
+                    claimed_this_round += 1
+        if claimed_this_round == 0:
+            break
+    return prepared
+
+
+def _prepare_task_batch_for_pool(
+    *,
+    config: RunConfig,
+    pool: v.TaskPool,
+    pool_label: str,
+    state_lock: threading.Lock,
+    pool_solve_semaphore: threading.Semaphore | None = None,
+    batch_size: int | None = None,
+) -> bool:
+    state = _load_manager_state(config)
+    king = state.current_king
+    if king is None or config.validate_task_pool_target <= 0:
+        return False
+
+    solve_batch_size = max(1, int(batch_size or config.validate_pool_filler_concurrency))
+    target_batch_size = _pool_prepare_batch_size(
+        config=config,
+        pool=pool,
+        king=king,
+        pool_label=pool_label,
+        max_batch_size=solve_batch_size,
+    )
+    if target_batch_size <= 0:
+        return False
+
+    viable: list[PreparedPoolTask] = []
+    attempts_remaining = target_batch_size * 3
+    while len(viable) < target_batch_size and attempts_remaining > 0:
+        needed = target_batch_size - len(viable)
+        round_size = min(needed, attempts_remaining)
+        attempts_remaining -= round_size
+        log.info(
+            "Pool manager[%s]: claiming up to %d eligible task(s) before probe batch",
+            pool_label,
+            round_size,
+        )
+        prepared = _claim_task_batch_for_pool(
+            config=config,
+            pool=pool,
+            pool_label=pool_label,
+            state_lock=state_lock,
+            batch_size=round_size,
+        )
+        if not prepared:
+            break
+
+        log.info(
+            "Pool manager[%s]: probing %d task candidate(s) before final king cache batch",
+            pool_label,
+            len(prepared),
+        )
+        viable.extend(
+            _probe_task_batch_for_pool(
+                config=config,
+                pool_label=pool_label,
+                prepared=prepared,
+                pool_solve_semaphore=pool_solve_semaphore,
+                probe_workers=solve_batch_size,
+            )
+        )
+
+    if not viable:
+        return False
+
+    if _pool_filler_paused_for_active_duel(config):
+        log.info("Pool manager[%s]: discarding probed batch because a duel became active", pool_label)
+        for item in viable:
+            _cleanup_prepared_pool_task(config, item)
+        return False
+
+    log.info(
+        "Pool manager[%s]: starting final king cache batch with %d task(s), solve concurrency cap=%d",
+        pool_label,
+        len(viable),
+        solve_batch_size,
+    )
+    solve_workers = min(len(viable), solve_batch_size)
+    with _POOL_FINAL_CACHE_BATCH_LOCK:
+        if _pool_filler_paused_for_active_duel(config):
+            log.info("Pool manager[%s]: discarding probed batch because a duel became active", pool_label)
+            for item in viable:
+                _cleanup_prepared_pool_task(config, item)
+            return False
+        with _reserve_pool_solve_slots(pool_solve_semaphore, solve_workers):
+            with ThreadPoolExecutor(max_workers=solve_workers) as executor:
+                futures = [
+                    executor.submit(
+                        _solve_and_insert_prepared_task,
+                        config=config,
+                        pool=pool,
+                        pool_label=pool_label,
+                        prepared=item,
+                        pool_solve_semaphore=None,
+                    )
+                    for item in viable
+                ]
+                results = [future.result() for future in futures]
+                return any(results)
+
+
+def _prepare_one_task_for_pool(
+    *,
+    config: RunConfig,
+    pool: v.TaskPool,
+    pool_label: str,
+    state_lock: threading.Lock,
+    pool_solve_semaphore: threading.Semaphore | None = None,
+) -> bool:
+    return _prepare_task_batch_for_pool(
+        config=config,
+        pool=pool,
+        pool_label=pool_label,
+        state_lock=state_lock,
+        pool_solve_semaphore=pool_solve_semaphore,
+        batch_size=1,
+    )
 
 
 def cleanup_old_task_workspaces(config: RunConfig, pools: Sequence[v.TaskPool]) -> None:
@@ -1431,12 +1869,13 @@ def _pool_worker_loop(
         if _pool_filler_paused_for_active_duel(config):
             stop_event.wait(5)
             continue
-        did_work = _prepare_one_task_for_pool(
+        did_work = _prepare_task_batch_for_pool(
             config=config,
             pool=pool,
             pool_label=pool_label,
             state_lock=state_lock,
             pool_solve_semaphore=pool_solve_semaphore,
+            batch_size=max(1, int(config.validate_pool_filler_concurrency)),
         )
         stop_event.wait(1 if did_work else 5)
 
@@ -1462,29 +1901,33 @@ def run_pool_manager(config: RunConfig) -> None:
         pass
 
     solve_slots = max(1, int(config.validate_pool_filler_concurrency))
-    workers = pool_filler_worker_count(config)
+    batch_size = pool_filler_worker_count(config)
     pool_solve_semaphore = threading.BoundedSemaphore(solve_slots)
-    log.info("Starting pool manager with %d worker(s) per pool and %d solve slot(s) at %s", workers, solve_slots, paths.root)
-    with ThreadPoolExecutor(max_workers=pool_filler_executor_workers(config)) as executor:
-        for _ in range(workers):
-            executor.submit(
-                _pool_worker_loop,
-                config=config,
-                pool=pool,
-                pool_label="primary",
-                stop_event=stop_event,
-                state_lock=state_lock,
-                pool_solve_semaphore=pool_solve_semaphore,
-            )
-            executor.submit(
-                _pool_worker_loop,
-                config=config,
-                pool=retest_pool,
-                pool_label="retest",
-                stop_event=stop_event,
-                state_lock=state_lock,
-                pool_solve_semaphore=pool_solve_semaphore,
-            )
+    log.info(
+        "Starting pool manager with batch size %d per pool and %d shared solve slot(s) at %s",
+        batch_size,
+        solve_slots,
+        paths.root,
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        executor.submit(
+            _pool_worker_loop,
+            config=config,
+            pool=pool,
+            pool_label="primary",
+            stop_event=stop_event,
+            state_lock=state_lock,
+            pool_solve_semaphore=pool_solve_semaphore,
+        )
+        executor.submit(
+            _pool_worker_loop,
+            config=config,
+            pool=retest_pool,
+            pool_label="retest",
+            stop_event=stop_event,
+            state_lock=state_lock,
+            pool_solve_semaphore=pool_solve_semaphore,
+        )
         while not stop_event.is_set():
             state = _load_manager_state(config)
             retried_uploads = retry_failed_task_uploads(
