@@ -8,6 +8,7 @@ that idle logging is edge-triggered.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,6 +110,18 @@ class FakeAxiom:
 
     def info(self, **fields: object) -> None:
         self.events.append(fields)
+
+
+class FakePromotionPublisher:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[str] = []
+
+    async def publish_submission(self, submission_id: str) -> object:
+        self.calls.append(submission_id)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(repo="octo/published", commit_sha="a" * 40)
 
 
 # -- config -------------------------------------------------------------------------
@@ -214,6 +227,45 @@ async def test_apply_promote() -> None:
     config = DuelResolverConfig(scoring_method=DuelScoringMethod.MEAN)
     await _apply(db, Promote(challenge), TickLog(), config=config)
     assert db.calls == [("promote", challenge, DuelScoringMethod.MEAN, 0, 0.05)]
+
+
+async def test_apply_promote_publishes_when_configured() -> None:
+    db, challenge = FakeDb(), _ac(P2)
+    publisher = FakePromotionPublisher()
+
+    await _apply(
+        db,
+        Promote(challenge),
+        TickLog(),
+        config=DuelResolverConfig(),
+        promotion_publisher=publisher,
+    )
+
+    assert publisher.calls == ["c"]
+    assert db.calls == [
+        ("promote", challenge, DuelScoringMethod.ROUND_WINS, 0, 0.05)
+    ]
+
+
+async def test_required_publish_failure_skips_promote() -> None:
+    db, challenge = FakeDb(), _ac(P2)
+    publisher = FakePromotionPublisher(error=RuntimeError("nope"))
+    config = DuelResolverConfig(
+        promotion_publish_repo="octo/published",
+        promotion_github_token="token",
+        promotion_publish_required=True,
+    )
+
+    await _apply(
+        db,
+        Promote(challenge),
+        TickLog(),
+        config=config,
+        promotion_publisher=publisher,
+    )
+
+    assert publisher.calls == ["c"]
+    assert db.calls == []
 
 
 async def test_apply_close_challenge_maps_king_defended() -> None:

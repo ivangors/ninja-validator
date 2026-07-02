@@ -95,23 +95,41 @@ class GitHubClient:
 
     async def get_json(self, path: str, **params: Any) -> Any:
         """Return just the JSON payload for *path*."""
-        _, payload = await self.get_with_response(path, **params)
+        _, payload = await self.request_with_response(
+            "GET", path, params=params or None
+        )
         return payload
 
     async def get_with_response(
         self, path: str, **params: Any
     ) -> tuple[httpx.Response, Any]:
         """GET *path*; return ``(response, payload)`` or raise ``GitHubRequestError``."""
+        return await self.request_with_response("GET", path, params=params or None)
+
+    async def post_json(self, path: str, payload: Any) -> Any:
+        """POST JSON to *path* and return the decoded JSON response."""
+        _, body = await self.request_with_response("POST", path, json=payload)
+        return body
+
+    async def patch_json(self, path: str, payload: Any) -> Any:
+        """PATCH JSON to *path* and return the decoded JSON response."""
+        _, body = await self.request_with_response("PATCH", path, json=payload)
+        return body
+
+    async def request_with_response(
+        self, method: str, path: str, **kwargs: Any
+    ) -> tuple[httpx.Response, Any]:
+        """Request *path* and return ``(response, decoded_json)``."""
         used_token: str | None = None
         try:
-            log.debug("GET %s params=%s", path, params or None)
+            log.debug("%s %s", method, path)
             request_headers: dict[str, str] = {}
             if self._rotator:
                 used_token = await self._rotator.get_token()
                 if used_token:
                     request_headers["Authorization"] = f"Bearer {used_token}"
-            response = await self._http.get(
-                path, params=params or None, headers=request_headers or None
+            response = await self._http.request(
+                method, path, headers=request_headers or None, **kwargs
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -125,13 +143,13 @@ class GitHubClient:
                     self._rotator.mark_rate_limited(
                         used_token, cooldown_seconds=_rate_limit_cooldown(exc.response)
                     )
-            raise GitHubRequestError(f"GET {path} failed: {exc}") from exc
+            raise GitHubRequestError(f"{method} {path} failed: {exc}") from exc
         except httpx.HTTPError as exc:
-            raise GitHubRequestError(f"GET {path} failed: {exc}") from exc
+            raise GitHubRequestError(f"{method} {path} failed: {exc}") from exc
 
         try:
             return response, response.json()
         except json.JSONDecodeError as exc:
             raise GitHubRequestError(
-                f"GET {path} returned invalid JSON: {exc}"
+                f"{method} {path} returned invalid JSON: {exc}"
             ) from exc

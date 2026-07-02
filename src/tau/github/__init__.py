@@ -8,6 +8,12 @@ from .errors import (
     NoCommitMetCriteria,
     RejectReason,
 )
+from .promotion import (
+    GitHubPromotionPublisher,
+    PromotionPublishConfig,
+    PromotionPublishError,
+    PublishedPromotion,
+)
 from .sampler import CommitSampler, SampledCommit
 from .tokens import GitHubTokenRotator
 from .types import CommitCandidate, CommitFile
@@ -21,9 +27,13 @@ __all__ = [
     "CommitSampler",
     "GitHubClient",
     "GitHubConfig",
+    "GitHubPromotionPublisher",
     "GitHubRequestError",
     "GitHubTokenRotator",
     "NoCommitMetCriteria",
+    "PromotionPublishConfig",
+    "PromotionPublishError",
+    "PublishedPromotion",
     "RejectReason",
     "SampledCommit",
 ]

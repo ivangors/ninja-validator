@@ -13,6 +13,11 @@ from contextlib import AsyncExitStack
 
 from tau.axiom import get_axiom
 from tau.db import DuelResolverDb
+from tau.github import (
+    GitHubClient,
+    GitHubPromotionPublisher,
+    PromotionPublishConfig,
+)
 from tau.pools import PoolTargets
 from tau.utils.logging import configure_logging
 
@@ -33,6 +38,21 @@ async def _serve(config: DuelResolverConfig, targets: PoolTargets) -> None:
     async with AsyncExitStack() as stack:
         db = DuelResolverDb()
         stack.push_async_callback(db.aclose)
+        promotion_publisher = None
+        if config.promotion_enabled:
+            github_client = GitHubClient.create(
+                token=config.promotion_github_token,
+                timeout=config.promotion_http_timeout,
+            )
+            stack.push_async_callback(github_client.aclose)
+            promotion_publisher = GitHubPromotionPublisher(
+                github_client,
+                PromotionPublishConfig(
+                    submissions_dir=config.promotion_submissions_dir,
+                    repo=config.promotion_publish_repo or "",
+                    branch=config.promotion_publish_branch,
+                ),
+            )
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -52,7 +72,13 @@ async def _serve(config: DuelResolverConfig, targets: PoolTargets) -> None:
             pool_two_target=targets.pool_two,
         )
         try:
-            await run_duel_resolver(db=db, targets=targets, config=config, stop=stop)
+            await run_duel_resolver(
+                db=db,
+                targets=targets,
+                config=config,
+                stop=stop,
+                promotion_publisher=promotion_publisher,
+            )
         finally:
             get_axiom().info(source="duel-resolver", event_type="exit_worker")
             log.info("duel resolver stopped")

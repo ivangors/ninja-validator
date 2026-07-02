@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import assert_never
+from typing import Protocol, assert_never
 
 from tau.axiom import get_axiom
 from tau.db import DuelResolverDb
@@ -31,12 +31,17 @@ from .telemetry import TickLog, close_outcome, emit_axiom
 log = logging.getLogger(__name__)
 
 
+class PromotionPublisher(Protocol):
+    async def publish_submission(self, submission_id: str) -> object: ...
+
+
 async def run_duel_resolver(
     *,
     db: DuelResolverDb,
     targets: PoolTargets,
     config: DuelResolverConfig,
     stop: asyncio.Event,
+    promotion_publisher: PromotionPublisher | None = None,
 ) -> None:
     """Poll, decide, and apply one action per tick until *stop* is set."""
     log.info(
@@ -54,7 +59,13 @@ async def run_duel_resolver(
                 round_win_margin=config.round_win_margin,
                 mean_score_margin=config.mean_score_margin,
             )
-            await _apply(db, action, ticklog, config=config)
+            await _apply(
+                db,
+                action,
+                ticklog,
+                config=config,
+                promotion_publisher=promotion_publisher,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as ex:
@@ -69,6 +80,7 @@ async def _apply(
     ticklog: TickLog,
     *,
     config: DuelResolverConfig,
+    promotion_publisher: PromotionPublisher | None = None,
 ) -> None:
     """Apply one action via the guarded writes, reporting the outcome to *ticklog*.
 
@@ -95,6 +107,13 @@ async def _apply(
                 applied, f"advanced to pool two: {challenge.challenger_submission_id}"
             )
         case Promote(challenge=challenge):
+            if not await _publish_promoted_submission(
+                challenge.challenger_submission_id,
+                ticklog,
+                config=config,
+                promotion_publisher=promotion_publisher,
+            ):
+                return
             applied = await db.promote(
                 challenge,
                 scoring_method=config.scoring_method,
@@ -120,6 +139,47 @@ async def _apply(
             assert_never(unreachable)
     if applied:
         emit_axiom(action, config)
+
+
+async def _publish_promoted_submission(
+    submission_id: str,
+    ticklog: TickLog,
+    *,
+    config: DuelResolverConfig,
+    promotion_publisher: PromotionPublisher | None,
+) -> bool:
+    """Publish the promoted submission if configured; return whether DB promote may run."""
+    if promotion_publisher is None:
+        return True
+    try:
+        published = await promotion_publisher.publish_submission(submission_id)
+    except Exception as ex:
+        if config.promotion_publish_required:
+            log.warning(
+                "promotion publish failed for %s; leaving challenge open: %s",
+                submission_id,
+                ex,
+            )
+            ticklog.action(False, f"promotion publish failed: {submission_id}")
+            return False
+        log.warning(
+            "promotion publish failed for %s; crowning anyway: %s",
+            submission_id,
+            ex,
+        )
+        return True
+    repo = getattr(published, "repo", None)
+    commit_sha = getattr(published, "commit_sha", None)
+    if repo and commit_sha:
+        log.info(
+            "published promoted submission %s to %s@%s",
+            submission_id,
+            repo,
+            str(commit_sha)[:12],
+        )
+    else:
+        log.info("published promoted submission %s", submission_id)
+    return True
 
 
 async def _sleep_until_stop(stop: asyncio.Event, seconds: float) -> None:
