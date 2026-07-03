@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from tau.db.status import PoolType
+if TYPE_CHECKING:
+    from tau.db.status import PoolType
 
 
 @dataclass(frozen=True, slots=True)
