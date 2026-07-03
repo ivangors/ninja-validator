@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import assert_never
 
-from tau.db.status import PoolType
-
 from .actions import (
     Action,
     AdvancePool,
@@ -23,6 +21,8 @@ from .predicates import (
 )
 from .scoring import DuelScoringMethod
 from .snapshot import ActiveChallenge, ChallengeSnapshot
+
+_POOL_ONE = 1
 
 
 def decide(
@@ -67,7 +67,7 @@ def decide_with_round_wins_scoring_method(
 
     if challenger_is_unbeatable(tally.wins, tally.losses, remaining, round_win_margin):
         # Pool cleared: pool #1 advances, pool #2 wins the crown.
-        if active.pool is PoolType.POOL_ONE:
+        if int(active.pool) == _POOL_ONE:
             return AdvancePool(active)
         return Promote(active)
     if challenger_cannot_catch(tally.wins, tally.losses, remaining, round_win_margin):
@@ -91,7 +91,7 @@ def decide_with_mean_scoring_method(
     ):
         return CloseChallenge(active, CloseReason.KING_DEFENDED)
 
-    if active.pool is PoolType.POOL_ONE:
+    if int(active.pool) == _POOL_ONE:
         return AdvancePool(active)
 
     return Promote(active)
