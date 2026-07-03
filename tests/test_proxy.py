@@ -12,6 +12,7 @@ import pytest
 
 from tau.proxy import REQUEST_LIMIT_EXIT_REASON, LLMProxy, SolveBudget, UpstreamTarget
 from tau.proxy.upstream import UpstreamClient, UpstreamResponse
+from tau.sandbox.config import SandboxConfig
 
 _UPSTREAM = UpstreamTarget(name="test", base_url="http://upstream.invalid", api_key="UPSTREAM-KEY")
 _BODY = {"model": "miner/model", "messages": [{"role": "user", "content": "hi"}], "top_k": 50}
@@ -124,6 +125,15 @@ def test_proxy_round_robins_multiple_upstream_urls() -> None:
         )
     finally:
         next(gen, None)
+
+
+def test_sandbox_config_requires_solver_model_env() -> None:
+    with pytest.raises(OSError, match="SOLVER_MODEL"):
+        SandboxConfig.from_env({})
+
+
+def test_sandbox_config_reads_solver_model_from_env() -> None:
+    assert SandboxConfig.from_env({"SOLVER_MODEL": "provider/model"}).model == "provider/model"
 
 
 def test_rejects_request_without_auth(proxy_with_model) -> None:

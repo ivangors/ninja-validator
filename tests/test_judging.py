@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 
+import httpx
+
 from tau.workers.judge import judge_with_fallback
+from tau.workers.judge.config import JudgeWorkerConfig
 
 from tau.judging import Solution, Task, judge
 from tau.judging.parsing import parse_verdict
 from tau.judging.prompt import build_prompt
-from tau.openrouter import RenderablePrompt
+from tau.openrouter import OpenRouterClient, RenderablePrompt, TextPrompt
 
 
 class FakeClient:
@@ -38,6 +41,65 @@ class HangingClient:
         self.calls += 1
         await asyncio.sleep(1)
         raise AssertionError("unreachable after timeout")
+
+
+def test_judge_config_defaults_to_glm_pinned_endpoint() -> None:
+    config = JudgeWorkerConfig.from_env({"OPENROUTER_API_KEY": "k"})
+
+    assert config.model == "z-ai/glm-5.2"
+    assert config.fallback_models == ()
+    assert config.provider == {
+        "only": ["z-ai/fp8"],
+        "allow_fallbacks": False,
+    }
+
+
+def test_judge_config_reads_openrouter_provider_routing() -> None:
+    config = JudgeWorkerConfig.from_env(
+        {
+            "OPENROUTER_API_KEY": "k",
+            "TAU_JUDGE_MODEL": "z-ai/glm-5.2",
+            "TAU_JUDGE_PROVIDER_ONLY": "z-ai/fp8",
+            "TAU_JUDGE_PROVIDER_ALLOW_FALLBACKS": "false",
+        }
+    )
+    assert config.model == "z-ai/glm-5.2"
+    assert config.fallback_models == ()
+    assert config.provider == {
+        "only": ["z-ai/fp8"],
+        "allow_fallbacks": False,
+    }
+
+
+async def test_openrouter_client_sends_provider_routing() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}}],
+                "model": "z-ai/glm-5.2",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenRouterClient(
+            "k",
+            model="z-ai/glm-5.2",
+            provider={
+                "only": ["z-ai/fp8"],
+                "allow_fallbacks": False,
+            },
+            client=http,
+        )
+        await client.complete_text(TextPrompt("judge"))
+
+    assert captured["payload"]["provider"] == {
+        "only": ["z-ai/fp8"],
+        "allow_fallbacks": False,
+    }
 
 
 def test_judge_blinds_prompt_and_stamps_client_model() -> None:

@@ -40,7 +40,7 @@ uv run python examples/task_solver/seed_duel.py --submissions-dir "$TAU_SUBMISSI
 
 # Run the solver. The ninja agents call the model through the proxy, so set a real
 # upstream (OpenRouter shown; or LLM_PROVIDER=ninja for our backend).
-OPENROUTER_API_KEY=sk-or-... SOLVER_MODEL=deepseek/deepseek-v4-flash \
+OPENROUTER_API_KEY=sk-or-... SOLVER_MODEL=provider/model \
   MAX_CONTAINERS=4 TAU_SOLVER_POLL_SECONDS=5 LOG_LEVEL=INFO uv run task-solver
 # Ctrl-C once the qualify + challenger-solve lines are logged.
 

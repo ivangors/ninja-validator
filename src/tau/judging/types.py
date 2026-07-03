@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-DEFAULT_JUDGE_MODEL = "google/gemini-3.1-flash-lite"
+DEFAULT_JUDGE_MODEL = "z-ai/glm-5.2"
 
 
 @dataclass(frozen=True, slots=True)

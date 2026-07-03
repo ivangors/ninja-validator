@@ -277,9 +277,9 @@ being sent to the model.
 - **Writes:** `judgements` (`llm_winner`, `king_score`, `challenger_score`,
   plus telemetry), `ON CONFLICT DO NOTHING` (first verdict wins).
 - **The `error` column is meaningful:** if all model attempts fail or time out,
-  the judge writes a **neutral fallback** (`0.5 / 0.5`, winner `tie`) with
+  the judge writes a **neutral error verdict** (`0.5 / 0.5`, winner `tie`) with
   `error` set — that is *not* a tie the model actually decided.
-- Retries across `TAU_JUDGE_ATTEMPTS` and a fallback model list, bounded by
+- Retries the configured judge model up to `TAU_JUDGE_ATTEMPTS`, bounded by
   `TAU_JUDGE_TOTAL_TIMEOUT`.
 
 ### 7.5 duel-resolver
@@ -535,14 +535,14 @@ authoritative, commented list). Grouped by concern:
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `OPENROUTER_API_KEY` | — | Key for the task-generator + judge (and default solver proxy upstream). Required unless both dummy modes are on. |
+| `OPENROUTER_API_KEY` | unset | Key for the task-generator + judge (and default solver proxy upstream). Required unless both dummy modes are on. |
 | `LLM_PROVIDER` | `openrouter` | Solver proxy upstream: `openrouter` \| `ninja` \| `custom`. |
-| `OPENROUTER_UPSTREAM_BASE_URL` | provider default | Override OpenRouter endpoint. |
-| `OPENROUTER_UPSTREAM_BASE_URLS` | — | Optional comma-separated solver proxy endpoints; requests are round-robined. |
-| `NINJA_INFERENCE_BASE_URL` / `NINJA_INFERENCE_API_KEY` | — | Used when `LLM_PROVIDER=ninja`. |
-| `NINJA_INFERENCE_BASE_URLS` | — | Optional comma-separated local inference endpoints, e.g. `http://IP:8000/v1,http://IP:8001/v1`. |
-| `LLM_UPSTREAM_BASE_URL` / `LLM_UPSTREAM_API_KEY` | — | Used when `LLM_PROVIDER=custom` (any OpenAI-compatible endpoint). |
-| `LLM_UPSTREAM_BASE_URLS` | — | Optional comma-separated custom endpoints, e.g. `http://IP:8000/v1,http://IP:8001/v1`. |
+| `OPENROUTER_UPSTREAM_BASE_URL` | `https://openrouter.ai/api` | Override OpenRouter endpoint. |
+| `OPENROUTER_UPSTREAM_BASE_URLS` | unset | Optional comma-separated solver proxy endpoints; requests are round-robined. |
+| `NINJA_INFERENCE_BASE_URL` / `NINJA_INFERENCE_API_KEY` | unset | Used when `LLM_PROVIDER=ninja`. |
+| `NINJA_INFERENCE_BASE_URLS` | unset | Optional comma-separated local inference endpoints, e.g. `<solver-host>:8000/v1,<solver-host>:8001/v1`. |
+| `LLM_UPSTREAM_BASE_URL` / `LLM_UPSTREAM_API_KEY` | unset | Used when `LLM_PROVIDER=custom` (any OpenAI-compatible endpoint). |
+| `LLM_UPSTREAM_BASE_URLS` | unset | Optional comma-separated custom endpoints, e.g. `<solver-host>:8000/v1,<solver-host>:8001/v1`. |
 
 ### task-generator tuning
 
@@ -559,9 +559,11 @@ authoritative, commented list). Grouped by concern:
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `TAU_JUDGE_MODEL` | `google/gemini-3.1-flash-lite` | Primary judge model. |
+| `TAU_JUDGE_MODEL` | `z-ai/glm-5.2` | Primary judge model. |
+| `TAU_JUDGE_PROVIDER_ONLY` | `z-ai/fp8` | OpenRouter endpoint/provider allowlist for the primary judge model. |
+| `TAU_JUDGE_PROVIDER_ALLOW_FALLBACKS` | `false` | Disable OpenRouter provider fallback for the primary judge model. |
 | `TAU_JUDGE_CONCURRENCY` | `5` | Judgements in flight. |
-| `TAU_JUDGE_ATTEMPTS` | `4` | LLM tries per round across fallbacks. |
+| `TAU_JUDGE_ATTEMPTS` | `4` | LLM tries per round. |
 | `TAU_JUDGE_LLM_TIMEOUT` | `120` | Per-attempt timeout (s). |
 | `TAU_JUDGE_TOTAL_TIMEOUT` | `300` | Cap on one pair's total judging time (s). |
 | `TAU_JUDGE_POLL_SECONDS` | `10` | Idle poll interval. |
@@ -580,7 +582,7 @@ authoritative, commented list). Grouped by concern:
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `SOLVER_MODEL` | `deepseek/deepseek-v4-flash` | Model the proxy forces every agent request onto. |
+| `SOLVER_MODEL` | required | Model the proxy forces every agent request onto. Set it in `.env`. |
 | `MAX_CONTAINERS` | `4` | Max concurrent sandboxes per tick (and per-tick batch size). |
 | `TAU_SOLVER_POLL_SECONDS` | `30` | Idle poll interval. |
 | `TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES` | `1` | Min diff lines the king must change to QUALIFY a task. |

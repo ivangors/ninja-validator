@@ -1,8 +1,8 @@
-"""Judge one duel round robustly: retry across attempts and model fallbacks.
+"""Judge one duel round robustly: retry across attempts and clients.
 
 Wraps the pure `tau.judging.judge` with the worker's transport policy -- retries
-per client, fall through to the next model, a total-time cap, and a neutral tie
-when everything is exhausted. The judging core stays unaware of any of this.
+per client, a total-time cap, and a neutral tie when everything is exhausted.
+The judging core stays unaware of any of this.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ class JudgeRun:
     """A completed judgment plus the worker telemetry around producing it."""
 
     judgment: Judgment
-    attempts: int  # LLM attempts started across retries + model fallbacks
+    attempts: int  # LLM attempts started across retries + clients
     duration_seconds: float
 
 
