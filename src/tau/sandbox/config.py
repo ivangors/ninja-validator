@@ -12,7 +12,6 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from tau.openrouter.client import DEFAULT_MODEL
 from tau.utils.env import env_bool, env_float, env_int, env_str
 
 
@@ -23,7 +22,7 @@ class SandboxConfig:
     no_cache: bool = False  # force a rebuild of the sandbox image
 
     # --- the model the proxy forces every agent request onto ---
-    model: str = DEFAULT_MODEL
+    model: str = ""
 
     # --- container resource limits (untrusted miner code runs here) ---
     memory: str = "2g"  # docker mem_limit; memswap is pinned equal => no swap
@@ -58,10 +57,13 @@ class SandboxConfig:
     def from_env(cls, environ: Mapping[str, str] | None = None) -> SandboxConfig:
         env = os.environ if environ is None else environ
         d = cls()
+        model = env_str(env, "SOLVER_MODEL", "")
+        if not model:
+            raise OSError("SOLVER_MODEL not set")
         return cls(
             image_name=env_str(env, "TAU_SANDBOX_IMAGE_NAME", d.image_name),
             no_cache=env_bool(env, "TAU_SANDBOX_NO_CACHE", d.no_cache),
-            model=env_str(env, "SOLVER_MODEL", d.model),
+            model=model,
             memory=env_str(env, "TAU_SANDBOX_MEMORY", d.memory),
             cpus=env_float(env, "TAU_SANDBOX_CPUS", d.cpus),
             pids_limit=env_int(env, "TAU_SANDBOX_PIDS_LIMIT", d.pids_limit),

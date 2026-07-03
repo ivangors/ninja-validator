@@ -50,6 +50,7 @@ async def _serve(config: JudgeWorkerConfig) -> None:
             event_type="init_worker",
             model=config.model,
             fallback_models=list(config.fallback_models),
+            provider=config.provider,
             concurrency=config.concurrency,
             attempts=config.attempts,
             poll_seconds=config.poll_seconds,
@@ -66,12 +67,12 @@ async def _serve(config: JudgeWorkerConfig) -> None:
 def _build_judge_clients(
     config: JudgeWorkerConfig,
 ) -> list[OpenRouterClient | DummyJudgeClient]:
-    """One configured client per model: primary first, then fallbacks.
+    """One configured client per judge model.
 
-    The primary (cache-capable) model carries reasoning; fallbacks do not — what
-    used to be per-call branching is now folded into client construction. Each
-    client owns its own connection pool (an OpenRouterClient implementation
-    detail), so the worker never touches the transport.
+    The primary (cache-capable) model carries reasoning and provider routing.
+    Any explicitly configured extra models omit both. Each client owns its own
+    connection pool (an OpenRouterClient implementation detail), so the worker
+    never touches the transport.
     """
     if config.use_dummy_llm:
         # "dummy/" marker (keeping the emulated model) so judgements.model shows the
@@ -100,6 +101,7 @@ def _build_judge_clients(
                 top_p=config.top_p,
                 max_tokens=config.max_tokens,
                 reasoning=config.reasoning if is_primary else None,
+                provider=config.provider if is_primary else None,
                 timeout=config.timeout_seconds,
             )
         )

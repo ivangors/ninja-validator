@@ -91,6 +91,7 @@ class OpenRouterClient:
         top_p: float | None = None,
         max_tokens: int | None = None,
         reasoning: dict[str, Any] | None = None,
+        provider: dict[str, Any] | None = None,
         timeout: int = 120,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -100,6 +101,7 @@ class OpenRouterClient:
         self._top_p = top_p
         self._max_tokens = max_tokens
         self._reasoning = reasoning
+        self._provider = provider
         self._timeout = timeout
         self._client = client if client is not None else httpx.AsyncClient()
         self._owns_client = client is None
@@ -136,6 +138,8 @@ class OpenRouterClient:
             payload["max_tokens"] = self._max_tokens
         if self._reasoning is not None:
             payload["reasoning"] = self._reasoning
+        if self._provider is not None:
+            payload["provider"] = dict(self._provider)
 
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -169,6 +173,7 @@ async def complete_text(
     top_p: float | None = None,
     max_tokens: int | None = None,
     reasoning: dict[str, Any] | None = None,
+    provider: dict[str, Any] | None = None,
 ) -> str:
     """One-shot async completion (creates and closes its own client).
 
@@ -183,6 +188,7 @@ async def complete_text(
         top_p=top_p,
         max_tokens=max_tokens,
         reasoning=reasoning,
+        provider=provider,
         timeout=timeout,
     ) as client:
         return await client.complete_text(renderable)
