@@ -255,6 +255,7 @@ def _exec_harness(
         "OPENAI_API_KEY": proxy.auth_token,
         "AGENT_API_BASE": proxy_base_url,
         "AGENT_API_KEY": proxy.auth_token,
+        "TAU_AGENT_TIMEOUT_SECONDS": str(req.timeout_seconds or config.hard_timeout_seconds),
         "HOME": "/tmp",
     }
     hard_timeout = req.timeout_seconds or config.hard_timeout_seconds
