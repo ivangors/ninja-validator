@@ -15,9 +15,9 @@ from typing import Any
 
 from .cache import json_sha256
 
-_INFRA_UPSTREAM_STATUSES = frozenset({401, 402, 403, 408, 429})
 _PREFIX_MESSAGE_ROLES = frozenset({"system", "developer", "user"})
 _MAX_PREFIX_CHARS = 16_000
+INFRA_UPSTREAM_STATUSES = frozenset({401, 402, 403, 408, 429})
 
 
 @dataclass(slots=True)
@@ -25,9 +25,6 @@ class _EndpointState:
     in_flight: int = 0
     failures: int = 0
     cooldown_until: float = 0.0
-    latency_ewma_ms: float | None = None
-    cached_tokens: int = 0
-    cache_write_tokens: int = 0
 
 
 @dataclass(slots=True)
@@ -84,10 +81,15 @@ class SmartUpstreamRouter:
                 selected = preferred
             else:
                 selected = self._least_loaded_locked(candidates)
-            if affinity_key:
-                self._remember_affinity_locked(affinity_key, selected, now)
             self._state_for(selected).in_flight += 1
             return selected
+
+    def remember_affinity(self, affinity_key: str | None, base_url: str) -> None:
+        if not affinity_key:
+            return
+        now = time.monotonic()
+        with self._lock:
+            self._remember_affinity_locked(affinity_key, base_url, now)
 
     def release(self, base_url: str) -> None:
         with self._lock:
@@ -100,23 +102,11 @@ class SmartUpstreamRouter:
         *,
         status_code: int | None,
         error: str | None,
-        latency_ms: int | None,
-        cached_tokens: int | None = None,
-        cache_write_tokens: int | None = None,
     ) -> None:
         now = time.monotonic()
         with self._lock:
             state = self._state_for(base_url)
-            if latency_ms is not None:
-                if state.latency_ewma_ms is None:
-                    state.latency_ewma_ms = float(latency_ms)
-                else:
-                    state.latency_ewma_ms = (state.latency_ewma_ms * 0.8) + (
-                        float(latency_ms) * 0.2
-                    )
-            state.cached_tokens += int(cached_tokens or 0)
-            state.cache_write_tokens += int(cache_write_tokens or 0)
-            if _is_infra_failure(status_code=status_code, error=error):
+            if is_upstream_infra_failure(status_code=status_code, error=error):
                 state.failures += 1
                 state.cooldown_until = now + (
                     self.cooldown_seconds * min(state.failures, 4)
@@ -233,10 +223,10 @@ def _truncate_content(value: Any, char_budget: int) -> Any:
     return value
 
 
-def _is_infra_failure(*, status_code: int | None, error: str | None) -> bool:
+def is_upstream_infra_failure(*, status_code: int | None, error: str | None) -> bool:
     if status_code is None:
         return error is not None
-    return status_code >= 500 or status_code in _INFRA_UPSTREAM_STATUSES
+    return status_code >= 500 or status_code in INFRA_UPSTREAM_STATUSES
 
 
 SMART_UPSTREAM_ROUTER = SmartUpstreamRouter()

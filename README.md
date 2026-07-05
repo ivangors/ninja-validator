@@ -538,11 +538,12 @@ authoritative, commented list). Grouped by concern:
 | `OPENROUTER_API_KEY` | unset | Key for the task-generator + judge (and default solver proxy upstream). Required unless both dummy modes are on. |
 | `LLM_PROVIDER` | `openrouter` | Solver proxy upstream: `openrouter` \| `ninja` \| `custom`. |
 | `OPENROUTER_UPSTREAM_BASE_URL` | `https://openrouter.ai/api` | Override OpenRouter endpoint. |
-| `OPENROUTER_UPSTREAM_BASE_URLS` | unset | Optional comma-separated solver proxy endpoints; requests are round-robined. |
+| `OPENROUTER_UPSTREAM_BASE_URLS` | unset | Optional comma-separated solver proxy endpoints; sandbox solves use smart sticky routing by default. |
 | `NINJA_INFERENCE_BASE_URL` / `NINJA_INFERENCE_API_KEY` | unset | Used when `LLM_PROVIDER=ninja`. |
-| `NINJA_INFERENCE_BASE_URLS` | unset | Optional comma-separated local inference endpoints, e.g. `<solver-host>:8000/v1,<solver-host>:8001/v1`. |
+| `NINJA_INFERENCE_BASE_URLS` | unset | Optional comma-separated local inference endpoints, e.g. `<solver-host>:8000/v1,<solver-host>:8001/v1`; sandbox solves use smart sticky routing by default. |
 | `LLM_UPSTREAM_BASE_URL` / `LLM_UPSTREAM_API_KEY` | unset | Used when `LLM_PROVIDER=custom` (any OpenAI-compatible endpoint). |
-| `LLM_UPSTREAM_BASE_URLS` | unset | Optional comma-separated custom endpoints, e.g. `<solver-host>:8000/v1,<solver-host>:8001/v1`. |
+| `LLM_UPSTREAM_BASE_URLS` | unset | Optional comma-separated custom endpoints, e.g. `<solver-host>:8000/v1,<solver-host>:8001/v1`; sandbox solves use smart sticky routing by default. |
+| `TAU_SOLVER_SMART_CACHE_ROUTING` | `true` | Keep each sandbox solve on one upstream endpoint and reuse prompt-prefix affinity across solves; set false for per-request round-robin. |
 
 ### task-generator tuning
 

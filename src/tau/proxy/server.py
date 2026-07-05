@@ -55,17 +55,15 @@ from .parsing import (
     set_requested_max_output_tokens,
 )
 from .rollout import build_llm_event, utc_now
-from .routing import SMART_UPSTREAM_ROUTER, request_affinity_key
+from .routing import (
+    SMART_UPSTREAM_ROUTER,
+    is_upstream_infra_failure,
+    request_affinity_key,
+)
 from .target import UpstreamTarget
 from .upstream import CachedUpstreamClient, HttpxUpstreamClient, UpstreamClient
 
 log = logging.getLogger(__name__)
-
-# Upstream statuses that indicate an infrastructure/provider fault (our problem, not the
-# agent's): our key rejected (401/403), out of funds (402), request timeout (408), rate
-# limited (429). 5xx is treated as infra separately. A 400/404/422 is the agent's own
-# malformed request and is deliberately excluded.
-_INFRA_UPSTREAM_STATUSES = frozenset({401, 402, 403, 408, 429})
 
 _MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
 _ALLOWED_METHODS = {"POST", "HEAD"}
@@ -101,12 +99,13 @@ def _is_upstream_infra_failure(request: ProxyRequestRecord) -> bool:
     """Whether a failed request reflects an upstream infrastructure fault, not the agent.
 
     True for a transport failure (no status but an error string — unreachable/timeout)
-    or an infra-class status (``_INFRA_UPSTREAM_STATUSES`` or any 5xx). False for the
+    or an infra-class status (shared routing infra statuses or any 5xx). False for the
     agent's own bad requests (4xx like 400/404/422) and for successful responses.
     """
-    if request.status_code is None:
-        return request.error is not None  # transport error: connect/read timeout, DNS
-    return request.status_code >= 500 or request.status_code in _INFRA_UPSTREAM_STATUSES
+    return is_upstream_infra_failure(
+        status_code=request.status_code,
+        error=request.error,
+    )
 
 
 class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -493,11 +492,17 @@ class LLMProxy:
                     return self._routed_upstream_base_url
             affinity_key = request_affinity_key(prepared_payload, request_path)
             base_url = SMART_UPSTREAM_ROUTER.acquire(self.upstream.base_urls, affinity_key)
+            use_acquired = False
             with self._lock:
                 if self._routed_upstream_base_url is None:
                     self._routed_upstream_base_url = base_url
-                    return base_url
-                routed_base_url = self._routed_upstream_base_url
+                    routed_base_url = base_url
+                    use_acquired = True
+                else:
+                    routed_base_url = self._routed_upstream_base_url
+            if use_acquired:
+                SMART_UPSTREAM_ROUTER.remember_affinity(affinity_key, routed_base_url)
+                return routed_base_url
             SMART_UPSTREAM_ROUTER.release(base_url)
             return routed_base_url
         with self._lock:
@@ -524,9 +529,6 @@ class LLMProxy:
             base_url,
             status_code=request.status_code,
             error=request.error,
-            latency_ms=request.latency_ms,
-            cached_tokens=request.cached_tokens,
-            cache_write_tokens=request.cache_write_tokens,
         )
 
     @staticmethod

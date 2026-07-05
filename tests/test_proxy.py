@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from tau.proxy import REQUEST_LIMIT_EXIT_REASON, LLMProxy, SolveBudget, UpstreamTarget
-from tau.proxy.routing import SMART_UPSTREAM_ROUTER
+from tau.proxy.routing import SMART_UPSTREAM_ROUTER, SmartUpstreamRouter
 from tau.proxy.upstream import HttpxUpstreamClient, UpstreamClient, UpstreamResponse
 from tau.sandbox.config import SandboxConfig
 
@@ -286,13 +286,42 @@ def test_smart_cache_routing_skips_endpoint_on_infra_failure() -> None:
         next(healthy_gen, None)
 
 
+def test_router_affinity_is_remembered_after_sticky_choice() -> None:
+    router = SmartUpstreamRouter()
+    urls = ("http://10.0.0.5:8000", "http://10.0.0.5:8001")
+
+    first = router.acquire(urls, "same-prefix")
+    router.release(first)
+    second = router.acquire(urls, "same-prefix")
+    router.release(second)
+
+    assert first == "http://10.0.0.5:8000"
+    assert second == "http://10.0.0.5:8001"
+
+    router.remember_affinity("same-prefix", first)
+    third = router.acquire(urls, "same-prefix")
+    try:
+        assert third == first
+    finally:
+        router.release(third)
+
+
 def test_sandbox_config_requires_solver_model_env() -> None:
     with pytest.raises(OSError, match="SOLVER_MODEL"):
         SandboxConfig.from_env({})
 
 
 def test_sandbox_config_reads_solver_model_from_env() -> None:
-    assert SandboxConfig.from_env({"SOLVER_MODEL": "provider/model"}).model == "provider/model"
+    config = SandboxConfig.from_env({"SOLVER_MODEL": "provider/model"})
+    assert config.model == "provider/model"
+    assert config.smart_cache_routing is True
+
+
+def test_sandbox_config_can_disable_smart_cache_routing() -> None:
+    config = SandboxConfig.from_env(
+        {"SOLVER_MODEL": "provider/model", "TAU_SOLVER_SMART_CACHE_ROUTING": "false"}
+    )
+    assert config.smart_cache_routing is False
 
 
 def test_rejects_request_without_auth(proxy_with_model) -> None:
