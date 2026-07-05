@@ -1,6 +1,10 @@
-"""The weight distribution rule: 40% to the reigning king, 15% to each of the next
-four prior kings; unfilled or deregistered slots burn to the burn uid. Emission
-follows the hotkey and shares accumulate per uid."""
+"""The weight distribution rule for the rolling king window.
+
+Before all five king slots are populated, the existing winners split 100% by the
+bootstrap table. Once five kings exist, distribution returns to the regular rule:
+40% to the reigning king and 15% to each of the next four prior kings. Emission
+follows the hotkey and shares accumulate per uid.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +13,24 @@ from collections.abc import Sequence
 from .types import MetagraphView, RecentKing, WeightPlan
 
 KING_EMISSION_SHARES: tuple[float, ...] = (0.40, 0.15, 0.15, 0.15, 0.15)
+BOOTSTRAP_KING_EMISSION_SHARES: dict[int, tuple[float, ...]] = {
+    1: (1.00,),
+    2: (0.60, 0.40),
+    3: (0.40, 0.30, 0.30),
+    4: (0.40, 0.20, 0.20, 0.20),
+}
 
 
-def king_emission_shares(window: int) -> tuple[float, ...]:
-    return KING_EMISSION_SHARES[: max(0, window)]
+def king_emission_shares(
+    window: int, king_count: int | None = None
+) -> tuple[float, ...]:
+    slots = max(0, window)
+    if king_count is None:
+        return KING_EMISSION_SHARES[:slots]
+    filled_slots = min(max(0, king_count), slots)
+    if filled_slots in BOOTSTRAP_KING_EMISSION_SHARES:
+        return BOOTSTRAP_KING_EMISSION_SHARES[filled_slots]
+    return KING_EMISSION_SHARES[:slots]
 
 
 def compute_weights(
@@ -22,7 +40,8 @@ def compute_weights(
     window: int,
     burn_uid: int,
 ) -> WeightPlan:
-    shares = king_emission_shares(window)
+    king_count = min(len(kings), max(0, window))
+    shares = king_emission_shares(window, king_count)
     weights_by_uid: dict[int, float] = {u: 0.0 for u in meta.uids}
     king_shares: dict[int, float] = {}
     burn = 0.0

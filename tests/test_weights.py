@@ -63,6 +63,14 @@ def test_shares_clip_to_window_and_table() -> None:
     assert king_emission_shares(-1) == ()
 
 
+def test_shares_bootstrap_until_five_king_slots_are_populated() -> None:
+    assert king_emission_shares(5, king_count=1) == (1.00,)
+    assert king_emission_shares(5, king_count=2) == (0.60, 0.40)
+    assert king_emission_shares(5, king_count=3) == (0.40, 0.30, 0.30)
+    assert king_emission_shares(5, king_count=4) == (0.40, 0.20, 0.20, 0.20)
+    assert king_emission_shares(5, king_count=5) == KING_EMISSION_SHARES
+
+
 # -- compute_weights ----------------------------------------------------------------
 
 
@@ -85,14 +93,40 @@ def test_full_window_distributes_40_15x4_with_no_burn() -> None:
     assert "burn=0.00" in plan.summary
 
 
-def test_single_king_pays_40_and_burns_60() -> None:
+def test_single_king_gets_full_bootstrap_weight() -> None:
     meta = _meta({10: "kA", 0: "burn"})
     plan = compute_weights([_king("sA", "kA")], meta, window=5, burn_uid=BURN_UID)
 
     assert plan.submittable
+    assert _weight_of(plan, 10) == pytest.approx(1.00)
+    assert _weight_of(plan, 0) == pytest.approx(0.0)
+    assert "uid10=1.00" in plan.summary and "burn=0.00" in plan.summary
+
+
+def test_two_kings_split_60_to_latest_and_40_to_prior() -> None:
+    meta = _meta({10: "latest", 11: "prior", 0: "burn"})
+    kings = [_king("sB", "latest"), _king("sA", "prior")]
+    plan = compute_weights(kings, meta, window=5, burn_uid=BURN_UID)
+
+    assert _weight_of(plan, 10) == pytest.approx(0.60)
+    assert _weight_of(plan, 11) == pytest.approx(0.40)
+    assert _weight_of(plan, 0) == pytest.approx(0.0)
+
+
+def test_four_kings_split_40_to_latest_and_20_to_each_prior() -> None:
+    meta = _meta({10: "latest", 11: "prior3", 12: "prior2", 13: "prior1", 0: "burn"})
+    kings = [
+        _king("sD", "latest"),
+        _king("sC", "prior3"),
+        _king("sB", "prior2"),
+        _king("sA", "prior1"),
+    ]
+    plan = compute_weights(kings, meta, window=5, burn_uid=BURN_UID)
+
     assert _weight_of(plan, 10) == pytest.approx(0.40)
-    assert _weight_of(plan, 0) == pytest.approx(0.60)
-    assert "uid10=0.40" in plan.summary and "burn=0.60" in plan.summary
+    for uid in (11, 12, 13):
+        assert _weight_of(plan, uid) == pytest.approx(0.20)
+    assert _weight_of(plan, 0) == pytest.approx(0.0)
 
 
 def test_no_kings_burns_everything() -> None:
@@ -111,8 +145,8 @@ def test_deregistered_king_slot_burns() -> None:
     plan = compute_weights(kings, meta, window=5, burn_uid=BURN_UID)
 
     assert _weight_of(plan, 10) == pytest.approx(0.40)
-    assert _weight_of(plan, 12) == pytest.approx(0.15)
-    assert _weight_of(plan, 0) == pytest.approx(0.45)  # kB's slot + slots 3,4 burn
+    assert _weight_of(plan, 12) == pytest.approx(0.30)
+    assert _weight_of(plan, 0) == pytest.approx(0.30)  # kB's bootstrap slot burns
 
 
 def test_same_hotkey_in_two_slots_accumulates() -> None:
@@ -120,14 +154,16 @@ def test_same_hotkey_in_two_slots_accumulates() -> None:
     kings = [_king("sA1", "kA"), _king("sB", "kB"), _king("sA2", "kA")]
     plan = compute_weights(kings, meta, window=5, burn_uid=BURN_UID)
 
-    assert _weight_of(plan, 10) == pytest.approx(0.55)  # slots 0 + 2
-    assert _weight_of(plan, 11) == pytest.approx(0.15)
-    assert _weight_of(plan, 0) == pytest.approx(0.30)  # slots 3, 4 empty
+    assert _weight_of(plan, 10) == pytest.approx(0.70)  # bootstrap slots 0 + 2
+    assert _weight_of(plan, 11) == pytest.approx(0.30)
+    assert _weight_of(plan, 0) == pytest.approx(0.0)
 
 
 def test_burn_owed_but_burn_uid_absent_is_unsubmittable() -> None:
     meta = _meta({10: "kA"})
-    plan = compute_weights([_king("sA", "kA")], meta, window=5, burn_uid=BURN_UID)
+    plan = compute_weights(
+        [_king("sA", "deregistered")], meta, window=5, burn_uid=BURN_UID
+    )
 
     assert not plan.submittable
     assert plan.skip_reason is not None and "burn uid 0" in plan.skip_reason
@@ -148,8 +184,8 @@ def test_full_burn_with_burn_uid_present_is_submittable() -> None:
 
 def test_non_default_burn_uid_is_honored() -> None:
     meta = _meta({10: "kA", 5: "burn"})
-    plan = compute_weights([_king("sA", "kA")], meta, window=5, burn_uid=5)
-    assert _weight_of(plan, 5) == pytest.approx(0.60)
+    plan = compute_weights([_king("sA", "deregistered")], meta, window=5, burn_uid=5)
+    assert _weight_of(plan, 5) == pytest.approx(1.00)
 
 
 # -- epoch math ---------------------------------------------------------------------
@@ -307,9 +343,9 @@ def test_step_sets_when_due() -> None:
     assert result.epoch_blocks == 3
     assert len(chain.set_calls) == 1
     uids, weights = chain.set_calls[0]
-    assert weights[uids.index(10)] == pytest.approx(0.40)
-    assert weights[uids.index(11)] == pytest.approx(0.15)
-    assert weights[uids.index(0)] == pytest.approx(0.45)
+    assert weights[uids.index(10)] == pytest.approx(0.60)
+    assert weights[uids.index(11)] == pytest.approx(0.40)
+    assert weights[uids.index(0)] == pytest.approx(0.0)
 
 
 def test_step_burn_mode_ignores_kings_and_burns_all() -> None:
@@ -326,7 +362,7 @@ def test_step_burn_mode_ignores_kings_and_burns_all() -> None:
 
 def test_step_skips_unsubmittable_without_setting() -> None:
     chain = FakeChain(params=_PARAMS, hotkeys={10: "kA"}, poll=_due_poll())  # no burn uid
-    db = FakeDb(kings=[_king("sA", "kA")])
+    db = FakeDb(kings=[_king("sA", "deregistered")])
 
     result = step(chain, db, _config(), _PARAMS)
 
