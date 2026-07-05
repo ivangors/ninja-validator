@@ -548,7 +548,7 @@ authoritative, commented list). Grouped by concern:
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `TAU_GENERATOR_MODEL` | `deepseek/deepseek-v4-flash` | Model that writes task descriptions. |
+| `TAU_GENERATOR_MODEL` | `deepseek/deepseek-v4-pro` | Model that writes task descriptions. |
 | `TAU_GENERATOR_DESCRIBE_CONCURRENCY` | `5` | Concurrent describer coroutines. |
 | `TAU_GENERATOR_LLM_ATTEMPTS` | `2` | LLM tries per commit before abandoning it. |
 | `TAU_GENERATOR_LLM_TIMEOUT` | `120` | Per-attempt LLM timeout (s). |
