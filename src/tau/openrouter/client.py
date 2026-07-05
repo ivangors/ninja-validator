@@ -22,7 +22,7 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
 
 
 class RenderablePrompt(Protocol):
