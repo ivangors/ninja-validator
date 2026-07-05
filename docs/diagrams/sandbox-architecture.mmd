@@ -27,7 +27,7 @@ flowchart TB
     solver -. "docker.sock:<br/>spawn sibling container" .-> box
     solver -. "assemble work tree<br/>on TAU_SANDBOX_WORK_ROOT" .-> work
 
-    hard["Hardening: read-only rootfs · cap_drop ALL ·<br/>no-new-privileges · mem 2g · 1 cpu · pids 256 ·<br/>hard timeout 1800s · first-token timeout 300s"]
+    hard["Hardening: read-only rootfs · cap_drop ALL ·<br/>no-new-privileges · mem 2g · 1 cpu · pids 256 ·<br/>hard timeout 600s · first-token timeout 300s"]
     box --- hard
 
     classDef trusted fill:#16a34a,stroke:#14532d,color:#fff;

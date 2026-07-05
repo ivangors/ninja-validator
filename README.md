@@ -338,7 +338,7 @@ The building blocks:
   and file descriptors. Only `/work` (the bind-mounted task tree) and `/tmp` are
   writable (tmpfs). Runs as the worker's own UID so it owns the mount without
   extra capabilities.
-- **Watchdog timeouts.** A hard wall-clock cap (`1800s`) and a first-token
+- **Watchdog timeouts.** A hard wall-clock cap (`600s`) and a first-token
   timeout (`300s`) kill a stuck or stalling agent.
 - **Clean work tree.** The task repo is cloned at the parent commit and its git
   credentials are scrubbed before the tree is exposed to the sandbox.
@@ -599,7 +599,7 @@ authoritative, commented list). Grouped by concern:
 | `TAU_SANDBOX_CPUS` | `1.0` | CPU limit. |
 | `TAU_SANDBOX_PIDS_LIMIT` | `256` | Max processes. |
 | `TAU_SANDBOX_NOFILE_LIMIT` | `4096` | File-descriptor ulimit. |
-| `TAU_SANDBOX_HARD_TIMEOUT_SECONDS` | `1800` | Absolute wall-clock cap per solve. |
+| `TAU_SANDBOX_HARD_TIMEOUT_SECONDS` | `600` | Absolute wall-clock cap per solve. |
 | `TAU_SANDBOX_FIRST_TOKEN_TIMEOUT_SECONDS` | `300` | Kill if the model never responds. |
 | `TAU_SANDBOX_DROP_CAPS` / `_NO_NEW_PRIVILEGES` / `_READ_ONLY_ROOTFS` | `true` | Container hardening toggles. |
 | `TAU_SANDBOX_WORK_TMPFS_SIZE` / `_TMP_TMPFS_SIZE` | `1g` / `512m` | Writable tmpfs sizes. |

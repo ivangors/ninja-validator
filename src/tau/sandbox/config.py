@@ -39,7 +39,7 @@ class SandboxConfig:
     run_as_user: str | None = None  # e.g. "1000:1000"; None keeps the image default
 
     # --- timeouts (seconds) ---
-    hard_timeout_seconds: int = 300  # absolute wall-clock cap on a solve
+    hard_timeout_seconds: int = 600  # absolute wall-clock cap on a solve
     first_token_timeout_seconds: int = 300  # kill if the model never responds
     container_ttl_seconds: int = 3600  # the `sleep` keeping the container alive
     # How long one upstream LLM call may take before the proxy times it out (the httpx

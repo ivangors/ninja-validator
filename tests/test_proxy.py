@@ -150,6 +150,12 @@ def test_sandbox_config_reads_solver_model_from_env() -> None:
     assert SandboxConfig.from_env({"SOLVER_MODEL": "provider/model"}).model == "provider/model"
 
 
+def test_sandbox_config_defaults_task_timeout_to_600_seconds() -> None:
+    config = SandboxConfig.from_env({"SOLVER_MODEL": "provider/model"})
+
+    assert config.hard_timeout_seconds == 600
+
+
 def test_rejects_request_without_auth(proxy_with_model) -> None:
     proxy, fake = proxy_with_model
     resp = _post(proxy, None, _BODY)
