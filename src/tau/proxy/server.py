@@ -55,16 +55,15 @@ from .parsing import (
     set_requested_max_output_tokens,
 )
 from .rollout import build_llm_event, utc_now
+from .routing import (
+    SMART_UPSTREAM_ROUTER,
+    is_upstream_infra_failure,
+    request_affinity_key,
+)
 from .target import UpstreamTarget
 from .upstream import CachedUpstreamClient, HttpxUpstreamClient, UpstreamClient
 
 log = logging.getLogger(__name__)
-
-# Upstream statuses that indicate an infrastructure/provider fault (our problem, not the
-# agent's): our key rejected (401/403), out of funds (402), request timeout (408), rate
-# limited (429). 5xx is treated as infra separately. A 400/404/422 is the agent's own
-# malformed request and is deliberately excluded.
-_INFRA_UPSTREAM_STATUSES = frozenset({401, 402, 403, 408, 429})
 
 _MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
 _ALLOWED_METHODS = {"POST", "HEAD"}
@@ -100,12 +99,13 @@ def _is_upstream_infra_failure(request: ProxyRequestRecord) -> bool:
     """Whether a failed request reflects an upstream infrastructure fault, not the agent.
 
     True for a transport failure (no status but an error string — unreachable/timeout)
-    or an infra-class status (``_INFRA_UPSTREAM_STATUSES`` or any 5xx). False for the
+    or an infra-class status (shared routing infra statuses or any 5xx). False for the
     agent's own bad requests (4xx like 400/404/422) and for successful responses.
     """
-    if request.status_code is None:
-        return request.error is not None  # transport error: connect/read timeout, DNS
-    return request.status_code >= 500 or request.status_code in _INFRA_UPSTREAM_STATUSES
+    return is_upstream_infra_failure(
+        status_code=request.status_code,
+        error=request.error,
+    )
 
 
 class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -136,6 +136,7 @@ class LLMProxy:
     rollout_capture_bodies: bool = False
     cache_dir: Path | None = None
     cache_replay_only: bool = False
+    smart_cache_routing: bool = False
     # Upstream transport timeouts (seconds). read = how long one LLM call may take
     # (settable via TAU_PROXY_REQUEST_TIMEOUT_SECONDS); connect governs how fast an
     # unreachable upstream is detected. write/pool reuse the connect timeout.
@@ -147,6 +148,7 @@ class LLMProxy:
     _unix_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _upstream_index: int = field(default=0, init=False, repr=False)
+    _routed_upstream_base_url: str | None = field(default=None, init=False, repr=False)
     _usage: SolveUsageSummary = field(default_factory=SolveUsageSummary, init=False, repr=False)
     _upstream_client: UpstreamClient = field(init=False, repr=False)
 
@@ -239,6 +241,7 @@ class LLMProxy:
             log.debug("LLM proxy listening on unix socket %s", self.unix_socket_path)
 
     def stop(self) -> None:
+        self._release_routed_upstream()
         if self._server is None and self._unix_server is None:
             return
         if self._server is not None:
@@ -384,7 +387,10 @@ class LLMProxy:
         start = time.monotonic()
 
         try:
-            upstream_base_url = self._next_upstream_base_url()
+            upstream_base_url = self._next_upstream_base_url(
+                prepared_payload=prepared_payload,
+                request_path=request_path,
+            )
             upstream = self._upstream_client.fetch(
                 command=handler.command,
                 url=f"{upstream_base_url}{handler.path}",
@@ -427,6 +433,7 @@ class LLMProxy:
                 error=f"{type(exc).__name__}: {exc}",
             )
             self._record_request(request_record, upstream_timeout=is_timeout)
+            self._record_routing_result(upstream_base_url, request_record)
             self._emit_rollout_llm_event(
                 method=handler.command, path=handler.path,
                 request_payload=prepared_payload if self.rollout_capture_bodies else None,
@@ -458,6 +465,7 @@ class LLMProxy:
             error=extract_response_error(upstream.payload) if upstream.status >= 400 else None,
         )
         self._record_request(request_record)
+        self._record_routing_result(upstream_base_url, request_record)
         self._emit_rollout_llm_event(
             method=handler.command, path=handler.path,
             request_payload=prepared_payload if self.rollout_capture_bodies else None,
@@ -477,12 +485,51 @@ class LLMProxy:
         handler.wfile.flush()
         handler.close_connection = True
 
-    def _next_upstream_base_url(self) -> str:
+    def _next_upstream_base_url(self, *, prepared_payload: Any, request_path: str) -> str:
+        if self.smart_cache_routing:
+            with self._lock:
+                if self._routed_upstream_base_url is not None:
+                    return self._routed_upstream_base_url
+            affinity_key = request_affinity_key(prepared_payload, request_path)
+            base_url = SMART_UPSTREAM_ROUTER.acquire(self.upstream.base_urls, affinity_key)
+            use_acquired = False
+            with self._lock:
+                if self._routed_upstream_base_url is None:
+                    self._routed_upstream_base_url = base_url
+                    routed_base_url = base_url
+                    use_acquired = True
+                else:
+                    routed_base_url = self._routed_upstream_base_url
+            if use_acquired:
+                SMART_UPSTREAM_ROUTER.remember_affinity(affinity_key, routed_base_url)
+                return routed_base_url
+            SMART_UPSTREAM_ROUTER.release(base_url)
+            return routed_base_url
         with self._lock:
             index = self._upstream_index % self.upstream.endpoint_count
             base_url = self.upstream.base_urls[index]
             self._upstream_index += 1
             return base_url
+
+    def _release_routed_upstream(self) -> None:
+        if not self.smart_cache_routing:
+            return
+        with self._lock:
+            base_url = self._routed_upstream_base_url
+            self._routed_upstream_base_url = None
+        if base_url is not None:
+            SMART_UPSTREAM_ROUTER.release(base_url)
+
+    def _record_routing_result(
+        self, base_url: str | None, request: ProxyRequestRecord
+    ) -> None:
+        if not self.smart_cache_routing or base_url is None:
+            return
+        SMART_UPSTREAM_ROUTER.record_result(
+            base_url,
+            status_code=request.status_code,
+            error=request.error,
+        )
 
     @staticmethod
     def _send_raw(

@@ -89,6 +89,7 @@ def run_agent_in_container(
         enforced_model=req.model or config.model,
         solve_budget=req.budget,
         upstream_read_timeout_seconds=config.proxy_request_timeout_seconds,
+        smart_cache_routing=config.smart_cache_routing and upstream.endpoint_count > 1,
     )
     container = None
     workdir: Path | None = None

@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from tau.proxy import REQUEST_LIMIT_EXIT_REASON, LLMProxy, SolveBudget, UpstreamTarget
+from tau.proxy.routing import SMART_UPSTREAM_ROUTER, SmartUpstreamRouter
 from tau.proxy.upstream import HttpxUpstreamClient, UpstreamClient, UpstreamResponse
 from tau.sandbox.config import SandboxConfig
 
@@ -54,6 +55,13 @@ class FakeUpstream(UpstreamClient):
             headers=httpx.Headers({"Content-Type": "application/json"}),
             first_token_latency_ms=None,
         )
+
+
+@pytest.fixture(autouse=True)
+def reset_smart_router() -> Iterator[None]:
+    SMART_UPSTREAM_ROUTER.reset()
+    yield
+    SMART_UPSTREAM_ROUTER.reset()
 
 
 def _running(proxy: LLMProxy, fake: FakeUpstream) -> Iterator[LLMProxy]:
@@ -141,13 +149,179 @@ def test_proxy_round_robins_multiple_upstream_urls() -> None:
         next(gen, None)
 
 
+def test_smart_cache_routing_sticks_to_one_endpoint_per_proxy() -> None:
+    fake = FakeUpstream()
+    upstream = UpstreamTarget(
+        name="test",
+        base_url="http://10.0.0.5:8000/v1",
+        base_urls=("http://10.0.0.5:8000/v1", "http://10.0.0.5:8001/v1"),
+        api_key="UPSTREAM-KEY",
+    )
+    proxy = LLMProxy(
+        upstream,
+        bind_host="127.0.0.1",
+        bind_port=0,
+        enforced_model="enforced/model",
+        smart_cache_routing=True,
+    )
+    gen = _running(proxy, fake)
+    proxy = next(gen)
+    try:
+        first = _post(proxy, proxy.auth_token, _BODY)
+        second = _post(
+            proxy,
+            proxy.auth_token,
+            {**_BODY, "messages": [{"role": "user", "content": "next"}]},
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert fake.calls[0]["url"].startswith(
+            "http://10.0.0.5:8000/v1/chat/completions"
+        )
+        assert fake.calls[1]["url"].startswith(
+            "http://10.0.0.5:8000/v1/chat/completions"
+        )
+    finally:
+        next(gen, None)
+
+
+def test_smart_cache_routing_reuses_prompt_affinity_across_proxies() -> None:
+    upstream = UpstreamTarget(
+        name="test",
+        base_url="http://10.0.0.5:8000/v1",
+        base_urls=("http://10.0.0.5:8000/v1", "http://10.0.0.5:8001/v1"),
+        api_key="UPSTREAM-KEY",
+    )
+    body = {
+        "model": "miner/model",
+        "messages": [
+            {"role": "system", "content": "same agent prompt"},
+            {"role": "user", "content": "same task"},
+        ],
+    }
+
+    first_fake = FakeUpstream()
+    first_proxy = LLMProxy(
+        upstream,
+        bind_host="127.0.0.1",
+        bind_port=0,
+        enforced_model="enforced/model",
+        smart_cache_routing=True,
+    )
+    first_gen = _running(first_proxy, first_fake)
+    first_proxy = next(first_gen)
+    try:
+        assert _post(first_proxy, first_proxy.auth_token, body).status_code == 200
+    finally:
+        next(first_gen, None)
+
+    second_fake = FakeUpstream()
+    second_proxy = LLMProxy(
+        upstream,
+        bind_host="127.0.0.1",
+        bind_port=0,
+        enforced_model="enforced/model",
+        smart_cache_routing=True,
+    )
+    second_gen = _running(second_proxy, second_fake)
+    second_proxy = next(second_gen)
+    try:
+        assert _post(second_proxy, second_proxy.auth_token, body).status_code == 200
+        assert first_fake.calls[0]["url"].startswith(
+            "http://10.0.0.5:8000/v1/chat/completions"
+        )
+        assert second_fake.calls[0]["url"].startswith(
+            "http://10.0.0.5:8000/v1/chat/completions"
+        )
+    finally:
+        next(second_gen, None)
+
+
+def test_smart_cache_routing_skips_endpoint_on_infra_failure() -> None:
+    upstream = UpstreamTarget(
+        name="test",
+        base_url="http://10.0.0.5:8000/v1",
+        base_urls=("http://10.0.0.5:8000/v1", "http://10.0.0.5:8001/v1"),
+        api_key="UPSTREAM-KEY",
+    )
+    body = {
+        "model": "miner/model",
+        "messages": [
+            {"role": "system", "content": "same agent prompt"},
+            {"role": "user", "content": "same task"},
+        ],
+    }
+
+    failed_fake = _StatusUpstream(503)
+    failed_proxy = LLMProxy(
+        upstream,
+        bind_host="127.0.0.1",
+        bind_port=0,
+        enforced_model="enforced/model",
+        smart_cache_routing=True,
+    )
+    failed_gen = _running(failed_proxy, failed_fake)
+    failed_proxy = next(failed_gen)
+    try:
+        assert _post(failed_proxy, failed_proxy.auth_token, body).status_code == 503
+    finally:
+        next(failed_gen, None)
+
+    healthy_fake = FakeUpstream()
+    healthy_proxy = LLMProxy(
+        upstream,
+        bind_host="127.0.0.1",
+        bind_port=0,
+        enforced_model="enforced/model",
+        smart_cache_routing=True,
+    )
+    healthy_gen = _running(healthy_proxy, healthy_fake)
+    healthy_proxy = next(healthy_gen)
+    try:
+        assert _post(healthy_proxy, healthy_proxy.auth_token, body).status_code == 200
+        assert healthy_fake.calls[0]["url"].startswith(
+            "http://10.0.0.5:8001/v1/chat/completions"
+        )
+    finally:
+        next(healthy_gen, None)
+
+
+def test_router_affinity_is_remembered_after_sticky_choice() -> None:
+    router = SmartUpstreamRouter()
+    urls = ("http://10.0.0.5:8000", "http://10.0.0.5:8001")
+
+    first = router.acquire(urls, "same-prefix")
+    router.release(first)
+    second = router.acquire(urls, "same-prefix")
+    router.release(second)
+
+    assert first == "http://10.0.0.5:8000"
+    assert second == "http://10.0.0.5:8001"
+
+    router.remember_affinity("same-prefix", first)
+    third = router.acquire(urls, "same-prefix")
+    try:
+        assert third == first
+    finally:
+        router.release(third)
+
+
 def test_sandbox_config_requires_solver_model_env() -> None:
     with pytest.raises(OSError, match="SOLVER_MODEL"):
         SandboxConfig.from_env({})
 
 
 def test_sandbox_config_reads_solver_model_from_env() -> None:
-    assert SandboxConfig.from_env({"SOLVER_MODEL": "provider/model"}).model == "provider/model"
+    config = SandboxConfig.from_env({"SOLVER_MODEL": "provider/model"})
+    assert config.model == "provider/model"
+    assert config.smart_cache_routing is True
+
+
+def test_sandbox_config_can_disable_smart_cache_routing() -> None:
+    config = SandboxConfig.from_env(
+        {"SOLVER_MODEL": "provider/model", "TAU_SOLVER_SMART_CACHE_ROUTING": "false"}
+    )
+    assert config.smart_cache_routing is False
 
 
 def test_sandbox_config_defaults_task_timeout_to_600_seconds() -> None:

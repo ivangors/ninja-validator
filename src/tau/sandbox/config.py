@@ -45,6 +45,7 @@ class SandboxConfig:
     # How long one upstream LLM call may take before the proxy times it out (the httpx
     # read timeout). A timeout is treated as a miner-unrelated infra fault (retry).
     proxy_request_timeout_seconds: float = 600.0
+    smart_cache_routing: bool = True
 
     def memswap_limit(self) -> str:
         # Equal to memory => the container gets no swap.
@@ -87,5 +88,8 @@ class SandboxConfig:
             ),
             proxy_request_timeout_seconds=env_float(
                 env, "TAU_PROXY_REQUEST_TIMEOUT_SECONDS", d.proxy_request_timeout_seconds
+            ),
+            smart_cache_routing=env_bool(
+                env, "TAU_SOLVER_SMART_CACHE_ROUTING", d.smart_cache_routing
             ),
         )
