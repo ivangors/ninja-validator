@@ -159,6 +159,31 @@ def test_same_hotkey_in_two_slots_accumulates() -> None:
     assert _weight_of(plan, 0) == pytest.approx(0.0)
 
 
+def test_burn_uid_does_not_count_as_a_king_slot() -> None:
+    meta = _meta({130: "new-king", 0: "burn-hotkey"})
+    kings = [_king("new", "new-king"), _king("burn", "burn-hotkey")]
+    plan = compute_weights(kings, meta, window=5, burn_uid=BURN_UID)
+
+    assert plan.submittable
+    assert _weight_of(plan, 130) == pytest.approx(1.00)
+    assert _weight_of(plan, 0) == pytest.approx(0.0)
+    assert "uid130=1.00" in plan.summary and "burn=0.00" in plan.summary
+
+
+def test_burn_uid_is_skipped_before_two_real_king_bootstrap() -> None:
+    meta = _meta({130: "new-king", 44: "prior-king", 0: "burn-hotkey"})
+    kings = [
+        _king("new", "new-king"),
+        _king("burn", "burn-hotkey"),
+        _king("prior", "prior-king"),
+    ]
+    plan = compute_weights(kings, meta, window=5, burn_uid=BURN_UID)
+
+    assert _weight_of(plan, 130) == pytest.approx(0.60)
+    assert _weight_of(plan, 44) == pytest.approx(0.40)
+    assert _weight_of(plan, 0) == pytest.approx(0.0)
+
+
 def test_burn_owed_but_burn_uid_absent_is_unsubmittable() -> None:
     meta = _meta({10: "kA"})
     plan = compute_weights(
