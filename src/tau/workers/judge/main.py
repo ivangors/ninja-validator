@@ -51,8 +51,10 @@ async def _serve(config: JudgeWorkerConfig) -> None:
             model=config.model,
             fallback_models=list(config.fallback_models),
             provider=config.provider,
+            fallback_provider=config.fallback_provider,
             concurrency=config.concurrency,
             attempts=config.attempts,
+            max_tokens=config.max_tokens,
             poll_seconds=config.poll_seconds,
             total_timeout_seconds=config.total_timeout_seconds,
             use_dummy_llm=config.use_dummy_llm,
@@ -69,10 +71,9 @@ def _build_judge_clients(
 ) -> list[OpenRouterClient | DummyJudgeClient]:
     """One configured client per judge model.
 
-    The primary (cache-capable) model carries reasoning and provider routing.
-    Any explicitly configured extra models omit both. Each client owns its own
-    connection pool (an OpenRouterClient implementation detail), so the worker
-    never touches the transport.
+    The primary model uses the primary provider route. Fallbacks may repeat the
+    same model with a different provider, so primary-ness is positional, not a
+    model-name comparison.
     """
     if config.use_dummy_llm:
         # "dummy/" marker (keeping the emulated model) so judgements.model shows the
@@ -91,8 +92,8 @@ def _build_judge_clients(
             )
         ]
     clients: list[OpenRouterClient | DummyJudgeClient] = []
-    for model in (config.model, *config.fallback_models):
-        is_primary = model == config.model
+    for index, model in enumerate((config.model, *config.fallback_models)):
+        is_primary = index == 0
         clients.append(
             OpenRouterClient(
                 config.openrouter_api_key,
@@ -100,8 +101,10 @@ def _build_judge_clients(
                 temperature=config.temperature,
                 top_p=config.top_p,
                 max_tokens=config.max_tokens,
-                reasoning=config.reasoning if is_primary else None,
-                provider=config.provider if is_primary else None,
+                reasoning=(
+                    config.reasoning if is_primary or model == config.model else None
+                ),
+                provider=config.provider if is_primary else config.fallback_provider,
                 timeout=config.timeout_seconds,
             )
         )

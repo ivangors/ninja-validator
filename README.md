@@ -564,6 +564,10 @@ authoritative, commented list). Grouped by concern:
 | `TAU_JUDGE_MODEL` | `z-ai/glm-5.2` | Primary judge model. |
 | `TAU_JUDGE_PROVIDER_ONLY` | `z-ai/fp8` | OpenRouter endpoint/provider allowlist for the primary judge model. |
 | `TAU_JUDGE_PROVIDER_ALLOW_FALLBACKS` | `false` | Disable OpenRouter provider fallback for the primary judge model. |
+| `TAU_JUDGE_FALLBACK_MODELS` | `z-ai/glm-5.2` | Comma-separated fallback judge models tried after the primary route. |
+| `TAU_JUDGE_FALLBACK_PROVIDER_ONLY` | `atlas-cloud/fp8` | OpenRouter provider allowlist for fallback judge models. |
+| `TAU_JUDGE_FALLBACK_PROVIDER_ALLOW_FALLBACKS` | `false` | Disable OpenRouter provider fallback for the fallback route. |
+| `TAU_JUDGE_MAX_TOKENS` | `32000` | Output cap per judge LLM call. |
 | `TAU_JUDGE_CONCURRENCY` | `5` | Judgements in flight. |
 | `TAU_JUDGE_ATTEMPTS` | `4` | LLM tries per round. |
 | `TAU_JUDGE_LLM_TIMEOUT` | `120` | Per-attempt timeout (s). |

@@ -12,6 +12,7 @@ from tau.judging import Solution, Task, judge
 from tau.judging.parsing import parse_verdict
 from tau.judging.prompt import build_prompt
 from tau.openrouter import OpenRouterClient, RenderablePrompt, TextPrompt
+from tau.workers.judge.main import _build_judge_clients
 
 
 class FakeClient:
@@ -47,11 +48,16 @@ def test_judge_config_defaults_to_glm_pinned_endpoint() -> None:
     config = JudgeWorkerConfig.from_env({"OPENROUTER_API_KEY": "k"})
 
     assert config.model == "z-ai/glm-5.2"
-    assert config.fallback_models == ()
+    assert config.fallback_models == ("z-ai/glm-5.2",)
     assert config.provider == {
         "only": ["z-ai/fp8"],
         "allow_fallbacks": False,
     }
+    assert config.fallback_provider == {
+        "only": ["atlas-cloud/fp8"],
+        "allow_fallbacks": False,
+    }
+    assert config.max_tokens == 32_000
 
 
 def test_judge_config_reads_openrouter_provider_routing() -> None:
@@ -59,16 +65,42 @@ def test_judge_config_reads_openrouter_provider_routing() -> None:
         {
             "OPENROUTER_API_KEY": "k",
             "TAU_JUDGE_MODEL": "z-ai/glm-5.2",
+            "TAU_JUDGE_FALLBACK_MODELS": "z-ai/glm-5.2",
             "TAU_JUDGE_PROVIDER_ONLY": "z-ai/fp8",
             "TAU_JUDGE_PROVIDER_ALLOW_FALLBACKS": "false",
+            "TAU_JUDGE_FALLBACK_PROVIDER_ONLY": "atlas-cloud/fp8",
+            "TAU_JUDGE_FALLBACK_PROVIDER_ALLOW_FALLBACKS": "false",
+            "TAU_JUDGE_MAX_TOKENS": "32000",
         }
     )
     assert config.model == "z-ai/glm-5.2"
-    assert config.fallback_models == ()
+    assert config.fallback_models == ("z-ai/glm-5.2",)
     assert config.provider == {
         "only": ["z-ai/fp8"],
         "allow_fallbacks": False,
     }
+    assert config.fallback_provider == {
+        "only": ["atlas-cloud/fp8"],
+        "allow_fallbacks": False,
+    }
+    assert config.max_tokens == 32_000
+
+
+def test_judge_clients_use_distinct_primary_and_fallback_routes() -> None:
+    config = JudgeWorkerConfig.from_env({"OPENROUTER_API_KEY": "k"})
+
+    clients = _build_judge_clients(config)
+
+    assert len(clients) == 2
+    assert clients[0]._provider == {"only": ["z-ai/fp8"], "allow_fallbacks": False}
+    assert clients[1]._provider == {
+        "only": ["atlas-cloud/fp8"],
+        "allow_fallbacks": False,
+    }
+    assert clients[0]._max_tokens == 32_000
+    assert clients[1]._max_tokens == 32_000
+    assert clients[0]._reasoning == {"enabled": True, "exclude": True}
+    assert clients[1]._reasoning == {"enabled": True, "exclude": True}
 
 
 async def test_openrouter_client_sends_provider_routing() -> None:
