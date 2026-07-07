@@ -17,7 +17,12 @@ from tau.proxy.upstream import HttpxUpstreamClient, UpstreamClient, UpstreamResp
 from tau.sandbox.config import SandboxConfig
 
 _UPSTREAM = UpstreamTarget(name="test", base_url="http://upstream.invalid", api_key="UPSTREAM-KEY")
-_BODY = {"model": "miner/model", "messages": [{"role": "user", "content": "hi"}], "top_k": 50}
+_BODY = {
+    "model": "miner/model",
+    "messages": [{"role": "user", "content": "hi"}],
+    "top_k": 50,
+    "seed": 999,
+}
 _TOOLS = [
     {
         "type": "function",
@@ -102,8 +107,28 @@ def test_injects_upstream_key_and_enforces_model(proxy_with_model) -> None:
     # The miner's model was overridden, and miner-controlled sampling stripped.
     assert call["payload"]["model"] == "enforced/model"
     assert "top_k" not in call["payload"]
+    assert "seed" not in call["payload"]
     assert call["payload"]["temperature"] == 0.0
     assert call["payload"]["tools"] == _TOOLS
+
+
+def test_enforces_validator_seed_over_miner_seed() -> None:
+    fake = FakeUpstream()
+    proxy = LLMProxy(
+        _UPSTREAM,
+        bind_host="127.0.0.1",
+        bind_port=0,
+        enforced_model="enforced/model",
+        enforced_sampling_params={"temperature": 0.0, "top_p": 1.0, "seed": 12345},
+    )
+    gen = _running(proxy, fake)
+    proxy = next(gen)
+    try:
+        resp = _post(proxy, proxy.auth_token, {**_BODY, "seed": 999})
+        assert resp.status_code == 200
+        assert fake.calls[-1]["payload"]["seed"] == 12345
+    finally:
+        next(gen, None)
 
 
 def test_custom_upstream_from_env_accepts_multiple_base_urls() -> None:

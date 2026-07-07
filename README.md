@@ -328,8 +328,9 @@ The building blocks:
   token, then forwards the request to the real upstream with the **real key
   injected server-side** — the key never enters the container. The proxy also:
   - **forces the model** (`SOLVER_MODEL`) and locks sampling params
-    (`temperature=0`, `top_p=1`), stripping miner-supplied params like `seed`,
-    `top_k`, `logit_bias`;
+    (`temperature=0`, `top_p=1`, plus a stable validator-owned `seed` derived
+    from the task id), stripping miner-supplied params like `seed`, `top_k`,
+    `logit_bias`;
   - **enforces per-solve spend caps** (`SOLVER_MAX_*`), clamping `max_tokens`
     and rejecting requests that would exceed a budget;
   - **records usage / rollouts** (redacting secrets).
