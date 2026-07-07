@@ -16,7 +16,12 @@ import pytest
 from tau.sandbox.harness import HARNESS_SCRIPT, RESULT_SENTINEL
 from tau.sandbox.network import _OWN_CONTAINER_ID
 from tau.sandbox.repo import CloneError, _authed_url, _git
-from tau.sandbox.runner import _parse_result, _prepare_workdir
+from tau.sandbox.runner import (
+    _parse_result,
+    _prepare_workdir,
+    _task_sampling_params,
+    _task_seed,
+)
 from tau.sandbox.types import AgentRunRequest
 from tau.workers.task_solver.loop import _changed_lines
 
@@ -125,6 +130,26 @@ def test_prepare_workdir_preserves_repo_symlinks(tmp_path: Path) -> None:
         assert copied_dangling.readlink() == Path("missing.py")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_task_seed_is_stable_unique_and_json_safe() -> None:
+    first = _task_seed("task-alpha")
+    again = _task_seed("task-alpha")
+    second = _task_seed("task-beta")
+
+    assert first == again
+    assert first != second
+    assert 0 <= first < 2**53
+
+
+def test_task_sampling_params_lock_validator_defaults() -> None:
+    params = _task_sampling_params("task-alpha")
+
+    assert params == {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "seed": _task_seed("task-alpha"),
+    }
 
 
 def test_harness_script_is_valid_python() -> None:

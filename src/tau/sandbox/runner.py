@@ -24,6 +24,7 @@ host run the default temp dir works as-is.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -68,6 +69,10 @@ from .types import (
 
 log = logging.getLogger(__name__)
 
+_TASK_SEED_BITS = 53
+_TASK_SEED_MASK = (1 << _TASK_SEED_BITS) - 1
+_VALIDATOR_TASK_SAMPLING_PARAMS: dict[str, float] = {"temperature": 0.0, "top_p": 1.0}
+
 
 def run_agent_in_container(
     req: AgentRunRequest,
@@ -87,6 +92,7 @@ def run_agent_in_container(
         bind_host="0.0.0.0",  # reachable from the sandbox over the shared network
         bind_port=0,  # OS-assigned free port
         enforced_model=req.model or config.model,
+        enforced_sampling_params=_task_sampling_params(req.task_id),
         solve_budget=req.budget,
         upstream_read_timeout_seconds=config.proxy_request_timeout_seconds,
         smart_cache_routing=config.smart_cache_routing and upstream.endpoint_count > 1,
@@ -183,6 +189,15 @@ def run_agent_in_container(
         _cleanup(container, proxy)
         if workdir is not None:
             shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _task_seed(task_id: str) -> int:
+    digest = hashlib.sha256(task_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & _TASK_SEED_MASK
+
+
+def _task_sampling_params(task_id: str) -> dict[str, float | int]:
+    return {**_VALIDATOR_TASK_SAMPLING_PARAMS, "seed": _task_seed(task_id)}
 
 
 def _hardening_kwargs(config: SandboxConfig) -> dict:
