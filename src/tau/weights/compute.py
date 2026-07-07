@@ -1,9 +1,9 @@
 """The weight distribution rule for the rolling king window.
 
-Before all five king slots are populated, the existing winners split 100% by the
-bootstrap table. Once five kings exist, distribution returns to the regular rule:
-40% to the reigning king and 15% to each of the next four prior kings. Emission
-follows the hotkey and shares accumulate per uid.
+Before all five non-burn king slots are populated, the existing winners split 100%
+by the bootstrap table. Once five non-burn kings exist, distribution returns to the
+regular rule: 40% to the reigning king and 15% to each of the next four prior kings.
+Emission follows the hotkey and shares accumulate per uid.
 """
 
 from __future__ import annotations
@@ -40,14 +40,15 @@ def compute_weights(
     window: int,
     burn_uid: int,
 ) -> WeightPlan:
-    king_count = min(len(kings), max(0, window))
+    eligible_kings = _non_burn_kings(kings, meta, burn_uid)
+    king_count = min(len(eligible_kings), max(0, window))
     shares = king_emission_shares(window, king_count)
     weights_by_uid: dict[int, float] = {u: 0.0 for u in meta.uids}
     king_shares: dict[int, float] = {}
     burn = 0.0
 
     for slot, share in enumerate(shares):
-        king = kings[slot] if slot < len(kings) else None
+        king = eligible_kings[slot] if slot < len(eligible_kings) else None
         uid = meta.uid_by_hotkey.get(king.hotkey) if king is not None else None
         if king is not None and uid is not None and uid in weights_by_uid:
             weights_by_uid[uid] += share
@@ -67,3 +68,13 @@ def compute_weights(
     kings_str = ", ".join(f"uid{u}={s:.2f}" for u, s in king_shares.items())
     summary = f"kings=[{kings_str}] burn={burn:.2f}"
     return WeightPlan(uids, weights, True, None, summary)
+
+
+def _non_burn_kings(
+    kings: Sequence[RecentKing], meta: MetagraphView, burn_uid: int
+) -> list[RecentKing]:
+    return [
+        king
+        for king in kings
+        if meta.uid_by_hotkey.get(king.hotkey) != burn_uid
+    ]
