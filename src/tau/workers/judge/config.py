@@ -11,10 +11,12 @@ from tau.judging.types import DEFAULT_JUDGE_MODEL
 from tau.openrouter.dummy import DummyLLMConfig
 from tau.utils.env import env_bool, env_float, env_int, env_str
 
-_FALLBACK_MODELS: tuple[str, ...] = ()
+_FALLBACK_MODELS: tuple[str, ...] = (DEFAULT_JUDGE_MODEL,)
 _REASONING = {"enabled": True, "exclude": True}
 _DEFAULT_PROVIDER_ONLY = ("z-ai/fp8",)
 _DEFAULT_PROVIDER_ALLOW_FALLBACKS = False
+_DEFAULT_FALLBACK_PROVIDER_ONLY = ("atlas-cloud/fp8",)
+_DEFAULT_FALLBACK_PROVIDER_ALLOW_FALLBACKS = False
 # Cap on one round's total judging time, across retries.
 TOTAL_TIMEOUT_SECONDS = 300.0
 
@@ -25,10 +27,13 @@ class JudgeWorkerConfig:
     model: str = DEFAULT_JUDGE_MODEL
     fallback_models: tuple[str, ...] = _FALLBACK_MODELS
     provider: dict[str, Any] | None = field(default_factory=lambda: _default_provider())
+    fallback_provider: dict[str, Any] | None = field(
+        default_factory=lambda: _default_fallback_provider()
+    )
     attempts: int = 4
     temperature: float = 0
     top_p: float = 1
-    max_tokens: int = 16_000
+    max_tokens: int = 32_000
     timeout_seconds: int = 120
     total_timeout_seconds: float = TOTAL_TIMEOUT_SECONDS
     reasoning: dict[str, Any] | None = field(default_factory=lambda: dict(_REASONING))
@@ -48,6 +53,8 @@ class JudgeWorkerConfig:
             raise ValueError("openrouter_api_key is required unless use_dummy_llm is set")
         if self.concurrency < 1:
             raise ValueError("concurrency must be >= 1")
+        if self.max_tokens < 1:
+            raise ValueError("max_tokens must be >= 1")
         if self.poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
 
@@ -70,8 +77,17 @@ class JudgeWorkerConfig:
         return cls(
             openrouter_api_key=api_key,
             model=env_str(env, "TAU_JUDGE_MODEL", d.model),
+            fallback_models=_env_csv(
+                env, "TAU_JUDGE_FALLBACK_MODELS", d.fallback_models
+            ),
             provider=_provider_from_env(env, default=d.provider),
+            fallback_provider=_provider_from_env(
+                env,
+                default=d.fallback_provider,
+                prefix="TAU_JUDGE_FALLBACK_PROVIDER",
+            ),
             attempts=env_int(env, "TAU_JUDGE_ATTEMPTS", d.attempts),
+            max_tokens=env_int(env, "TAU_JUDGE_MAX_TOKENS", d.max_tokens),
             timeout_seconds=env_int(env, "TAU_JUDGE_LLM_TIMEOUT", d.timeout_seconds),
             total_timeout_seconds=env_float(
                 env, "TAU_JUDGE_TOTAL_TIMEOUT", d.total_timeout_seconds
@@ -112,30 +128,40 @@ def _default_provider() -> dict[str, Any]:
     }
 
 
+def _default_fallback_provider() -> dict[str, Any]:
+    return {
+        "only": list(_DEFAULT_FALLBACK_PROVIDER_ONLY),
+        "allow_fallbacks": _DEFAULT_FALLBACK_PROVIDER_ALLOW_FALLBACKS,
+    }
+
+
 def _provider_from_env(
-    env: Mapping[str, str], *, default: dict[str, Any] | None
+    env: Mapping[str, str],
+    *,
+    default: dict[str, Any] | None,
+    prefix: str = "TAU_JUDGE_PROVIDER",
 ) -> dict[str, Any] | None:
     provider_vars = {
-        "TAU_JUDGE_PROVIDER_ONLY",
-        "TAU_JUDGE_PROVIDER_ORDER",
-        "TAU_JUDGE_PROVIDER_QUANTIZATIONS",
-        "TAU_JUDGE_PROVIDER_ALLOW_FALLBACKS",
+        f"{prefix}_ONLY",
+        f"{prefix}_ORDER",
+        f"{prefix}_QUANTIZATIONS",
+        f"{prefix}_ALLOW_FALLBACKS",
     }
     if not any(name in env for name in provider_vars):
         return dict(default) if default is not None else None
 
     provider: dict[str, Any] = {}
-    only = _env_csv(env, "TAU_JUDGE_PROVIDER_ONLY", ())
+    only = _env_csv(env, f"{prefix}_ONLY", ())
     if only:
         provider["only"] = list(only)
-    order = _env_csv(env, "TAU_JUDGE_PROVIDER_ORDER", ())
+    order = _env_csv(env, f"{prefix}_ORDER", ())
     if order:
         provider["order"] = list(order)
-    quantizations = _env_csv(env, "TAU_JUDGE_PROVIDER_QUANTIZATIONS", ())
+    quantizations = _env_csv(env, f"{prefix}_QUANTIZATIONS", ())
     if quantizations:
         provider["quantizations"] = list(quantizations)
-    if "TAU_JUDGE_PROVIDER_ALLOW_FALLBACKS" in env:
+    if f"{prefix}_ALLOW_FALLBACKS" in env:
         provider["allow_fallbacks"] = env_bool(
-            env, "TAU_JUDGE_PROVIDER_ALLOW_FALLBACKS", True
+            env, f"{prefix}_ALLOW_FALLBACKS", True
         )
     return provider or None
