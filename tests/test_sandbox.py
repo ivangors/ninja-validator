@@ -7,16 +7,21 @@ harness source, and the diff-line counter — is tested here.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
 
+from tau.sandbox.config import SandboxConfig
 from tau.sandbox.harness import HARNESS_SCRIPT, RESULT_SENTINEL
+from tau.sandbox.image import _build_context, _sortdir_source, image_tag
 from tau.sandbox.network import _OWN_CONTAINER_ID
 from tau.sandbox.repo import CloneError, _authed_url, _git
 from tau.sandbox.runner import (
+    _deterministic_agent_env,
     _parse_result,
     _prepare_workdir,
     _task_sampling_params,
@@ -150,6 +155,138 @@ def test_task_sampling_params_lock_validator_defaults() -> None:
         "top_p": 1.0,
         "seed": _task_seed("task-alpha"),
     }
+
+
+def test_deterministic_agent_env_includes_sortdir_preload(monkeypatch) -> None:
+    monkeypatch.delenv("TAU_DISABLE_SORTDIR", raising=False)
+
+    env = _deterministic_agent_env()
+
+    assert env["LD_PRELOAD"] == "/opt/tau/libsortdir.so"
+    assert env["PYTHONHASHSEED"] == "0"
+    assert env["PYTHONUNBUFFERED"] == "1"
+    assert env["TZ"] == "UTC"
+    assert env["HOME"] == "/tmp"
+    assert env["TMPDIR"] == "/tmp"
+    assert env["LANG"] == "C.UTF-8"
+    assert env["LC_ALL"] == "C.UTF-8"
+
+
+def test_deterministic_agent_env_can_disable_sortdir(monkeypatch) -> None:
+    monkeypatch.setenv("TAU_DISABLE_SORTDIR", "1")
+
+    assert "LD_PRELOAD" not in _deterministic_agent_env()
+
+
+def test_sandbox_image_build_context_contains_sortdir() -> None:
+    context = _build_context()
+
+    with tarfile.open(fileobj=context, mode="r") as tar:
+        names = sorted(tar.getnames())
+        dockerfile = tar.extractfile("Dockerfile").read().decode("utf-8")
+        sortdir = tar.extractfile("sortdir.c").read().decode("utf-8")
+
+    assert names == ["Dockerfile", "sortdir.c"]
+    assert "COPY sortdir.c /opt/tau/sortdir.c" in dockerfile
+    assert "libsortdir.so" in dockerfile
+    assert sortdir == _sortdir_source()
+    assert "readdir64" in sortdir
+
+
+def test_sandbox_image_tag_tracks_sortdir_source(monkeypatch) -> None:
+    import tau.sandbox.image as image
+
+    config = SandboxConfig(image_name="tau-test")
+    monkeypatch.setattr(image, "_sortdir_source", lambda: "source one")
+    first = image_tag(config)
+    monkeypatch.setattr(image, "_sortdir_source", lambda: "source two")
+    second = image_tag(config)
+
+    assert first.startswith("tau-test:")
+    assert len(first.removeprefix("tau-test:")) == 16
+    assert first != second
+
+
+def test_sortdir_shim_sorts_and_rewinds_when_compiled(tmp_path: Path) -> None:
+    gcc = shutil.which("gcc")
+    if gcc is None:
+        pytest.skip("gcc unavailable")
+
+    lib = tmp_path / "libsortdir.so"
+    subprocess.run(
+        [
+            gcc,
+            "-O2",
+            "-shared",
+            "-fPIC",
+            "-o",
+            str(lib),
+            str(Path(__file__).parents[1] / "src" / "tau" / "sandbox" / "sortdir.c"),
+            "-ldl",
+            "-lpthread",
+        ],
+        check=True,
+    )
+
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    for name in ("z", "a", "m"):
+        (entries / name).touch()
+
+    helper = tmp_path / "check_sortdir.c"
+    helper.write_text(
+        r'''
+#include <dirent.h>
+#include <stdio.h>
+
+static void print_rest(DIR *d) {
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        printf("%s ", e->d_name);
+    }
+    printf("\n");
+}
+
+int main(int argc, char **argv) {
+    DIR *d = opendir(argv[1]);
+    if (d == NULL) return 1;
+
+    struct dirent *first = readdir(d);
+    printf("first=%s\n", first ? first->d_name : "NULL");
+
+    long mark = telldir(d);
+    struct dirent *second = readdir(d);
+    printf("second=%s\n", second ? second->d_name : "NULL");
+
+    seekdir(d, mark);
+    struct dirent *again = readdir(d);
+    printf("again=%s\n", again ? again->d_name : "NULL");
+
+    rewinddir(d);
+    printf("rewound=");
+    print_rest(d);
+
+    closedir(d);
+    return 0;
+}
+''',
+        encoding="utf-8",
+    )
+    helper_bin = tmp_path / "check_sortdir"
+    subprocess.run([gcc, "-O2", "-o", str(helper_bin), str(helper)], check=True)
+
+    output = subprocess.check_output(
+        [str(helper_bin), str(entries)],
+        env={**os.environ, "LD_PRELOAD": str(lib)},
+        text=True,
+    )
+
+    assert output.splitlines() == [
+        "first=.",
+        "second=..",
+        "again=..",
+        "rewound=. .. a m z ",
+    ]
 
 
 def test_harness_script_is_valid_python() -> None:
