@@ -386,6 +386,9 @@ def _run(
             base_commit=job.base_commit,
             token=config.github_token,
             dest=Path(tmp) / "repo",
+            cache_dir=config.task_repo_cache_dir,
+            fetch_concurrency=config.task_repo_fetch_concurrency,
+            cache_max_entries=config.task_repo_cache_max_entries,
         )
         request = AgentRunRequest(
             task_id=job.task_id,
