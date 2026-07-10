@@ -40,26 +40,40 @@ class _FakeDb:
 
 def _job() -> SolveJob:
     return SolveJob(
-        task_id="t1", submission_id="s1", problem_statement="p",
-        repo_clone_url="u", base_commit="c",
+        task_id="t1",
+        submission_id="s1",
+        problem_statement="p",
+        repo_clone_url="u",
+        base_commit="c",
     )
 
 
 def _duel_job() -> DuelSolveJob:
     return DuelSolveJob(
-        task_id="t1", submission_id="s1", challenger_submission_id="c1",
-        problem_statement="p", repo_clone_url="u", base_commit="c",
+        task_id="t1",
+        submission_id="s1",
+        challenger_submission_id="c1",
+        problem_statement="p",
+        repo_clone_url="u",
+        base_commit="c",
     )
 
 
 def _config() -> SimpleNamespace:
-    return SimpleNamespace(qualify_min_changed_lines=1, submissions_dir=Path("/nonexistent"))
+    return SimpleNamespace(
+        qualify_min_changed_lines=1, submissions_dir=Path("/nonexistent")
+    )
 
 
-def _result(exit_reason: str, *, success: bool = False, diff: str = "") -> AgentRunResult:
+def _result(
+    exit_reason: str, *, success: bool = False, diff: str = ""
+) -> AgentRunResult:
     return AgentRunResult(
-        success=success, solution_diff=diff, exit_reason=exit_reason,
-        elapsed_seconds=1.0, usage=None,
+        success=success,
+        solution_diff=diff,
+        exit_reason=exit_reason,
+        elapsed_seconds=1.0,
+        usage=None,
         error="boom" if exit_reason != EXIT_COMPLETED else None,
     )
 
@@ -86,7 +100,7 @@ _TERMINAL = [
 ]
 
 
-def test_tick_prioritizes_duel_jobs_before_qualification(monkeypatch) -> None:
+def test_pending_work_prioritizes_duels_before_qualification(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
     duel_jobs = [
         _duel_job(),
@@ -131,27 +145,33 @@ def test_tick_prioritizes_duel_jobs_before_qualification(monkeypatch) -> None:
 
     db = Db()
     monkeypatch.setattr(
-        loop_mod, "_solve_duel", lambda job, **_kw: calls.append(("duel", job.submission_id))
+        loop_mod,
+        "_solve_duel",
+        lambda job, **_kw: calls.append(("duel", job.submission_id)),
     )
     monkeypatch.setattr(
-        loop_mod, "_qualify", lambda job, **_kw: calls.append(("qual", job.submission_id))
+        loop_mod,
+        "_qualify",
+        lambda job, **_kw: calls.append(("qual", job.submission_id)),
     )
 
-    ran = loop_mod._tick(
+    work = loop_mod._pending_work(
         db=db,
         client=None,
         config=SimpleNamespace(
-            max_containers=3,
             require_full_pool_for_duels=False,
             pool_targets=None,
         ),
         image_tag="img",
-        stop=threading.Event(),
+        limit=3,
+        exclude=set(),
     )
 
-    assert ran == 3
+    assert [phase for _, phase, _ in work] == ["duel", "duel", "qualification"]
     assert db.duel_limit == 3
     assert db.qualification_limit == 1
+    for _, _, fn in work:
+        fn()
     assert sum(kind == "duel" for kind, _submission in calls) == 2
     assert sum(kind == "qual" for kind, _submission in calls) == 1
 
@@ -170,8 +190,7 @@ def test_qualification_terminal_outcome_persists(monkeypatch, result) -> None:
     _stub_run(monkeypatch, result)
     db, cfg = _FakeDb(), _config()
     _qualify(db, cfg)
-    assert len(db.qualifications) == 1  # a verdict is recorded (QUALIFIED/DISQUALIFIED)
-    assert db.qualifications[0]["exit_reason"] == result.exit_reason
+    assert len(db.qualifications) == 1  # a solve is recorded (pending/disqualified)
 
 
 def test_qualification_agent_error_disqualifies(monkeypatch) -> None:
@@ -195,7 +214,9 @@ def test_duel_terminal_outcome_saves_solution(monkeypatch, result) -> None:
     _stub_run(monkeypatch, result)
     db, cfg = _FakeDb(), _config()
     _duel(db, cfg)
-    assert len(db.duel_solutions) == 1  # bad agents (empty/crash) are saved instantly too
+    assert (
+        len(db.duel_solutions) == 1
+    )  # bad agents (empty/crash) are saved instantly too
     assert db.duel_solutions[0]["exit_reason"] == result.exit_reason
     assert db.duel_solutions[0]["challenger_submission_id"] == "c1"
 
@@ -249,8 +270,6 @@ def test_qualification_clone_error_disqualifies_task(monkeypatch) -> None:
             "king_submission_id": "s1",
             "qualified": False,
             "solution": "",
-            "duration": 0.0,
-            "exit_reason": "task_setup_failed",
         }
     ]
     assert fake.exceptions[0]["event_type"] == "qualification_task_setup_failed"
@@ -269,25 +288,37 @@ def _report(monkeypatch, result: AgentRunResult) -> _FakeAxiom:
 
 def _res(reason: str, *, usage=None, error: str | None = None) -> AgentRunResult:
     return AgentRunResult(
-        success=False, solution_diff="", exit_reason=reason,
-        elapsed_seconds=1.0, usage=usage, error=error,
+        success=False,
+        solution_diff="",
+        exit_reason=reason,
+        elapsed_seconds=1.0,
+        usage=usage,
+        error=error,
     )
 
 
 def test_report_failure_llm_timeout_is_info_category(monkeypatch) -> None:
-    fake = _report(monkeypatch, _res(EXIT_UPSTREAM_ERROR, usage=_usage(timeouts=1, last="ReadTimeout: x")))
+    fake = _report(
+        monkeypatch,
+        _res(EXIT_UPSTREAM_ERROR, usage=_usage(timeouts=1, last="ReadTimeout: x")),
+    )
     assert fake.failures[0]["category"] == "llm_timeout"
     assert fake.failures[0]["exception"] == "ReadTimeout: x"
 
 
 def test_report_failure_llm_error_when_not_timeout(monkeypatch) -> None:
-    fake = _report(monkeypatch, _res(EXIT_UPSTREAM_ERROR, usage=_usage(timeouts=0, last="HTTP 402")))
+    fake = _report(
+        monkeypatch,
+        _res(EXIT_UPSTREAM_ERROR, usage=_usage(timeouts=0, last="HTTP 402")),
+    )
     assert fake.failures[0]["category"] == "llm_error"
     assert fake.failures[0]["exception"] == "HTTP 402"
 
 
 def test_report_failure_agent_error_includes_traceback(monkeypatch) -> None:
-    fake = _report(monkeypatch, _res(EXIT_AGENT_ERROR, error="Traceback ... ValueError"))
+    fake = _report(
+        monkeypatch, _res(EXIT_AGENT_ERROR, error="Traceback ... ValueError")
+    )
     assert fake.failures[0]["category"] == "agent_error"
     assert "ValueError" in fake.failures[0]["exception"]
 
@@ -307,34 +338,55 @@ def test_report_failure_noop_on_completion(monkeypatch) -> None:
     assert fake.failures == []
 
 
-def _run_loop_and_capture_waits(monkeypatch, *, ran: int, ticks: int) -> list[float]:
-    """Drive ``run`` with a stubbed ``_tick`` returning *ran*; record sleep lengths."""
-    waits: list[float] = []
+def test_run_refills_a_free_slot_without_waiting_for_straggler(monkeypatch) -> None:
+    jobs = [
+        SolveJob(
+            task_id=f"t{i}",
+            submission_id="s1",
+            problem_statement="p",
+            repo_clone_url="u",
+            base_commit="c",
+        )
+        for i in range(3)
+    ]
+    release_first = threading.Event()
+    third_started = threading.Event()
     stop = threading.Event()
 
-    def fake_wait(seconds: float) -> bool:
-        waits.append(seconds)
-        if len(waits) >= ticks:
-            stop.set()
-        return stop.is_set()
+    class Db:
+        def next_duel_jobs(self, *_args, **_kwargs):
+            return []
 
-    monkeypatch.setattr(loop_mod, "_tick", lambda **_kw: ran)
-    stop.wait = fake_wait  # type: ignore[method-assign]
-    loop_mod.run(
-        db=object(),
-        client=None,
-        config=SimpleNamespace(max_containers=4, poll_seconds=30.0),
-        image_tag="img",
-        stop=stop,
+        def next_qualification_jobs(self, limit):
+            return jobs[:limit]
+
+    def qualify(job, **_kwargs):
+        if job.task_id == "t0":
+            release_first.wait(2)
+        elif job.task_id == "t2":
+            third_started.set()
+
+    monkeypatch.setattr(loop_mod, "_qualify", qualify)
+    thread = threading.Thread(
+        target=loop_mod.run,
+        kwargs={
+            "db": Db(),
+            "client": None,
+            "config": SimpleNamespace(
+                max_containers=2,
+                poll_seconds=0.01,
+                require_full_pool_for_duels=False,
+                pool_targets=None,
+            ),
+            "image_tag": "img",
+            "stop": stop,
+        },
     )
-    return waits
-
-
-def test_run_uses_backlog_poll_when_tick_saturates(monkeypatch) -> None:
-    waits = _run_loop_and_capture_waits(monkeypatch, ran=4, ticks=2)
-    assert waits == [loop_mod.BACKLOG_POLL_SECONDS, loop_mod.BACKLOG_POLL_SECONDS]
-
-
-def test_run_uses_idle_poll_when_tick_is_partial_or_idle(monkeypatch) -> None:
-    assert _run_loop_and_capture_waits(monkeypatch, ran=0, ticks=1) == [30.0]
-    assert _run_loop_and_capture_waits(monkeypatch, ran=3, ticks=1) == [30.0]
+    thread.start()
+    try:
+        assert third_started.wait(2)
+    finally:
+        stop.set()
+        release_first.set()
+        thread.join(2)
+    assert not thread.is_alive()

@@ -5,7 +5,7 @@ A focused, self-contained slice of the DB seam (the same pattern as
 docker/git work — async would buy nothing. Two reads drive the worker's two phases:
 
   * ``next_qualification_jobs`` — CANDIDATE tasks of the reigning king, to be run
-    against the king's own agent (viability check);
+    against the king's own agent (viability check before difficulty screening);
   * ``next_duel_jobs`` — QUALIFIED tasks in active challenges where either side lacks
     a fresh challenge-scoped solution, to be run against the king or challenger agent.
 
@@ -131,23 +131,52 @@ class SolverDb:
         king_submission_id: str,
         qualified: bool,
         solution: str,
-        duration: float,
-        exit_reason: str,
     ) -> None:
-        """Flip a CANDIDATE task to QUALIFIED/DISQUALIFIED.
+        """Record the king solve and advance a CANDIDATE atomically.
 
-        Qualification is only a task-quality gate. Duel comparison solutions are
-        written later to ``duel_task_solutions`` so the king is re-run under the same
-        current inference conditions as the challenger for each challenge.
+        ``qualified`` means the basic solve-viability check passed; it does *not* make
+        the task duel-ready. A viable solve moves to ``PENDING_SCREEN`` for the
+        single-task difficulty scorer, while a terminal non-viable solve is immediately
+        ``DISQUALIFIED``. Duel comparison solutions are still written later so the king
+        is re-run under the same conditions as the challenger.
+
+        The guarded status update wins the row lock before the screening insert. This
+        makes concurrent/stale completions harmless and ensures the task state and its
+        screening row commit together.
         """
-        _ = (king_submission_id, solution, duration, exit_reason)
-        status = TaskStatus.QUALIFIED if qualified else TaskStatus.DISQUALIFIED
+        status = TaskStatus.PENDING_SCREEN if qualified else TaskStatus.DISQUALIFIED
         with session_scope(self._sessions) as session:
-            session.execute(
+            reigning_king_id = (
+                select(models.King.king_id)
+                .order_by(models.King.king_from.desc())
+                .limit(1)
+                .scalar_subquery()
+            )
+            result = session.execute(
                 update(models.Task)
-                .where(models.Task.task_id == task_id)
+                .where(
+                    models.Task.task_id == task_id,
+                    models.Task.king_id == king_submission_id,
+                    models.Task.king_id == reigning_king_id,
+                    models.Task.status_id == int(TaskStatus.CANDIDATE),
+                )
                 .values(status_id=int(status))
             )
+            if result.rowcount != 1:
+                log.info(
+                    "ignored stale qualification completion task=%s king=%s",
+                    task_id,
+                    king_submission_id,
+                )
+                return
+            if qualified:
+                session.execute(
+                    insert(models.TaskScreening).values(
+                        task_id=task_id,
+                        king_submission_id=king_submission_id,
+                        qualification_solution=solution,
+                    )
+                )
 
     # -- phase B: fresh duel solves ------------------------------------------
     def next_duel_jobs(

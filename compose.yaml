@@ -98,10 +98,10 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # Task-solver worker: qualify CANDIDATE tasks by running the reigning king's
-  # agent in a locked-down sandbox (-> QUALIFIED/DISQUALIFIED), then produce
-  # challenger solutions for active challenges (-> task_solutions, feeding the
-  # judge). It is docker-out-of-docker: it mounts the host Docker socket to spawn
+  # Task-solver worker: run the reigning king on CANDIDATE tasks in a locked-down
+  # sandbox (-> PENDING_SCREEN/DISQUALIFIED), then produce fresh king/challenger
+  # solutions for active challenges (-> duel_task_solutions, feeding the judge).
+  # It is docker-out-of-docker: it mounts the host Docker socket to spawn
   # sibling sandbox containers. The agent reaches the LLM only through an in-proc
   # proxy on a per-solve internal (internet-less) network; the upstream key never
   # enters the sandbox. INSTALL_GIT=true adds git for the host-side task clone.
@@ -130,6 +130,29 @@ services:
       # Shared work root, SAME path host<->container, so a sandbox's /work bind mount
       # (a subdir written here by this worker) resolves on the host daemon.
       - ${TAU_SANDBOX_WORK_ROOT:-/var/lib/tau/sandbox-work}:${TAU_SANDBOX_WORK_ROOT:-/var/lib/tau/sandbox-work}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Task-screener worker: score the reigning king's qualification patch for each
+  # PENDING_SCREEN task. Shadow mode (the default) records scores while admitting
+  # tasks; enforce mode DISQUALIFIES scores above the ceiling. Exhausted failures
+  # are dropped so one unscreenable task cannot stall a full-pool duel. This is
+  # single-candidate scoring and never reads or writes duel judgements.
+  task-screener:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: task-screener
+        WORKER: task-screener
+    container_name: pg_stack_task_screener
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
     depends_on:
       db:
         condition: service_healthy

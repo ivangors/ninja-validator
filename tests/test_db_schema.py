@@ -14,12 +14,18 @@ from tau.db.models import (
     Submission,
     SubmissionQualification,
     Task,
+    TaskScreening,
 )
 
 
 def test_task_status_values_are_stable() -> None:
     # These ints are persisted in tasks.status_id — they must not drift.
-    assert (TaskStatus.CANDIDATE, TaskStatus.QUALIFIED, TaskStatus.DISQUALIFIED) == (0, 1, 2)
+    assert (TaskStatus.CANDIDATE, TaskStatus.QUALIFIED, TaskStatus.DISQUALIFIED) == (
+        0,
+        1,
+        2,
+    )
+    assert TaskStatus.PENDING_SCREEN == 3
 
 
 def test_submission_status_values_are_stable() -> None:
@@ -88,7 +94,9 @@ def test_submission_status_has_check_constraint_matching_the_enum() -> None:
         if isinstance(c, CheckConstraint)
     }
     assert "ck_submissions_status_id" in checks
-    assert all(str(s.value) in checks["ck_submissions_status_id"] for s in SubmissionStatus)
+    assert all(
+        str(s.value) in checks["ck_submissions_status_id"] for s in SubmissionStatus
+    )
 
 
 def test_submission_agent_files_is_manifest_text_not_code_payload() -> None:
@@ -124,10 +132,63 @@ def test_submission_qualification_table_shape() -> None:
     } <= cols
 
 
+def test_task_screening_table_shape_and_foreign_keys() -> None:
+    assert [c.name for c in TaskScreening.__table__.primary_key.columns] == ["task_id"]
+    cols = TaskScreening.__table__.columns
+    assert {
+        "task_id",
+        "king_submission_id",
+        "qualification_solution",
+        "king_score",
+        "max_score",
+        "reason",
+        "model",
+        "failed_runs",
+        "next_retry_at",
+        "created_at",
+        "updated_at",
+    } == set(cols.keys())
+    for name in (
+        "task_id",
+        "king_submission_id",
+        "qualification_solution",
+        "failed_runs",
+        "created_at",
+        "updated_at",
+    ):
+        assert cols[name].nullable is False, name
+    fk_targets = {
+        (fk.parent.name, fk.column.table.name, fk.column.name)
+        for fk in TaskScreening.__table__.foreign_keys
+    }
+    assert ("task_id", "tasks", "task_id") in fk_targets
+    assert (
+        "king_submission_id",
+        "submissions",
+        "submission_id",
+    ) in fk_targets
+
+
+def test_task_screening_checks_bound_scores_and_failures() -> None:
+    checks = {
+        c.name: str(c.sqltext)
+        for c in TaskScreening.__table__.constraints
+        if isinstance(c, CheckConstraint)
+    }
+    assert "ck_task_screenings_king_score" in checks
+    assert "ck_task_screenings_max_score" in checks
+    assert "ck_task_screenings_failed_runs" in checks
+    assert "failed_runs >= 0" in checks["ck_task_screenings_failed_runs"]
+
+
 def test_challenge_status_values_are_stable() -> None:
     # Persisted in challenges.status; the active-pool values MUST equal PoolType so
     # the judge gate (task.pool_type == challenge.status) holds.
-    assert (ChallengeStatus.CLOSED, ChallengeStatus.POOL_ONE, ChallengeStatus.POOL_TWO) == (
+    assert (
+        ChallengeStatus.CLOSED,
+        ChallengeStatus.POOL_ONE,
+        ChallengeStatus.POOL_TWO,
+    ) == (
         0,
         1,
         2,
